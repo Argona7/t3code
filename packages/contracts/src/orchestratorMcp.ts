@@ -44,6 +44,7 @@ import {
 } from "./orchestrationV2.ts";
 import { ProviderOptionSelection, ProviderOptionSelectionValue } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
+import { ThreadFolder } from "./threadFolders.ts";
 
 const OrchestratorMcpPrompt = TrimmedNonEmptyString.check(Schema.isMaxLength(120_000));
 const OrchestratorMcpTitle = TrimmedNonEmptyString.check(Schema.isMaxLength(512));
@@ -56,6 +57,19 @@ export const OrchestratorMcpClientRequestId = TrimmedNonEmptyString.check(Schema
     ),
   )
   .annotate({ description: "Reuse it to retry the same call. A new call gets a new key." });
+export const OrchestratorMcpFolderTarget = Schema.optionalKey(
+  Schema.Union([
+    ThreadFolder.fields.id.check(Schema.isMaxLength(128)),
+    Schema.Null.annotate({ description: "Use All (unassigned)." }),
+  ]),
+).annotate({
+  description:
+    "ID from `t3_thread_folder_list` in the destination. Omit to inherit on the same server.",
+});
+
+export const OrchestratorMcpThreadFolderListResult = Schema.Struct({
+  folders: Schema.Array(ThreadFolder.mapFields(({ id, name }) => ({ id, name }))),
+});
 
 // OpenCode 1.15 serializes nested MCP union objects as JSON strings; decode that form at the boundary.
 const OrchestratorMcpScheduleFromJsonString = Schema.fromJsonString(
@@ -170,6 +184,7 @@ export type OrchestratorMcpTerminalDelegatedTaskStatus =
 
 export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   task: OrchestratorMcpPrompt,
+  folderId: OrchestratorMcpFolderTarget,
   target: Schema.optional(OrchestratorMcpTarget),
   title: Schema.optional(OrchestratorMcpTitle),
   role: Schema.optional(OrchestratorMcpTaskRole),
@@ -274,6 +289,7 @@ export type OrchestratorMcpTaskCancelResult = typeof OrchestratorMcpTaskCancelRe
 
 export const OrchestratorMcpCreateThreadRequest = Schema.Struct({
   prompt: Schema.optional(OrchestratorMcpPrompt),
+  folderId: OrchestratorMcpFolderTarget,
   title: Schema.optional(OrchestratorMcpTitle),
   target: Schema.optional(OrchestratorMcpTarget),
   runtimeMode: Schema.optional(OrchestratorMcpRuntimeMode),

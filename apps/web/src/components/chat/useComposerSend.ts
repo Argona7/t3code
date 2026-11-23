@@ -62,6 +62,7 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
 import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 import { newMessageId, newThreadId } from "~/lib/utils";
 import { useNewThreadHandler } from "../../hooks/useHandleNewThread";
+import { resolveThreadFolderId } from "../../hooks/useThreadFolders";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import {
   beginBackgroundDraftSubmissionByRef,
@@ -1296,6 +1297,15 @@ export function useComposerSend(input: ComposerSendInput) {
     let backgroundDraftOpened = false;
     let turnStartSucceeded = false;
     if (failure === null && turnAttachmentsResult._tag === "Success") {
+      // Read live draft metadata before it is finalized away by the thread creation.
+      const draftForSend =
+        isLocalDraftThread && draftId !== null
+          ? useComposerDraftStore.getState().getDraftSession(draftId)
+          : null;
+      const folderId =
+        draftForSend?.environmentId === environmentId
+          ? resolveThreadFolderId(environmentId, draftForSend.folderId)
+          : null;
       const bootstrap =
         isLocalDraftThread || baseBranchForWorktree
           ? {
@@ -1310,6 +1320,7 @@ export function useComposerSend(input: ComposerSendInput) {
                       branch: activeThreadBranch,
                       worktreePath: activeThread.worktreePath,
                       createdAt: activeThread.createdAt,
+                      ...(folderId !== null ? { folderId } : {}),
                     },
                   }
                 : {}),
@@ -1329,13 +1340,7 @@ export function useComposerSend(input: ComposerSendInput) {
         submissionIntent === "background" && isLocalDraftThread
           ? scopeThreadRef(environmentId, threadIdForSend)
           : null;
-      // Read the live session, not the render snapshot: the draft is finalized away once the
-      // thread exists.
-      const checkoutPullRequestUrl = isLocalDraftThread
-        ? checkoutPullRequestUrlToLink(
-            draftId === null ? null : useComposerDraftStore.getState().getDraftSession(draftId),
-          )
-        : null;
+      const checkoutPullRequestUrl = checkoutPullRequestUrlToLink(draftForSend);
       if (backgroundThreadRef) beginBackgroundDraftSubmissionByRef(backgroundThreadRef);
       const startPromise = startThreadTurn({
         environmentId,

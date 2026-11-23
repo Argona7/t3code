@@ -30,7 +30,14 @@ import { resolveRuntimeMode } from "../../delegatedTaskModes.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as OrchestrationMcp from "../../OrchestratorMcpService.ts";
-import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
+import {
+  assertThreadFolders,
+  newCommandId,
+  readCaller,
+  resolveProjectId,
+  threadFolderRejection,
+  unavailable,
+} from "../../threadAccess.ts";
 import { ProjectToolkit } from "./tools.ts";
 
 const isAboveCeilingError = Schema.is(OrchestratorRuntimeModeAboveCeilingError);
@@ -138,6 +145,19 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             message:
               "scratch:true picks its own project and folder; omit projectId and workspaceStrategy.",
           });
+        if (input.folderId != null) {
+          yield* assertThreadFolders(context.threads, [{ folderId: input.folderId, commandId }]);
+        }
+        // A retry of an accepted launch replays it: it keeps the model it started
+        // with and skips the checks only a new launch needs, which the project
+        // may no longer pass, such as a base branch deleted since.
+        const launched =
+          input.clientRequestId === undefined
+            ? null
+            : yield* context.threads.getThreadShell(threadId).pipe(Effect.mapError(unavailable));
+        const launchedModel =
+          launched === null || launched.deletedAt !== null ? undefined : launched.modelSelection;
+        const replaying = launchedModel !== undefined;
         const projectId =
           input.scratch === true
             ? (yield* ManagedProjectFolders.ManagedProjectFolders.pipe(
@@ -151,16 +171,6 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                 ),
               )).projectId
             : yield* resolveProjectId(context, input.projectId);
-        // A retry of an accepted launch replays it: it keeps the model it started
-        // with and skips the checks only a new launch needs, which the project
-        // may no longer pass, such as a base branch deleted since.
-        const launched =
-          input.clientRequestId === undefined
-            ? null
-            : yield* context.threads.getThreadShell(threadId).pipe(Effect.mapError(unavailable));
-        const launchedModel =
-          launched === null || launched.deletedAt !== null ? undefined : launched.modelSelection;
-        const replaying = launchedModel !== undefined;
         const project = replaying
           ? undefined
           : yield* Project.ProjectService.pipe(
@@ -286,6 +296,8 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
               }),
           createdBy: "agent",
           creationSource: "mcp",
+          ...(input.folderId === undefined ? {} : { folderId: input.folderId }),
+          ...(caller === undefined ? {} : { inheritFolderFromThreadId: caller.id }),
           ...(linkOrigin === undefined ? {} : { linkOrigin }),
           // Kept only alongside linkOrigin: thread.create drops it otherwise.
           ...(input.delegatedFrom === undefined ? {} : { delegatedFrom: input.delegatedFrom }),
@@ -304,13 +316,14 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
               });
             }
             // The administrator's ceiling refuses the mode; say so rather than "unavailable".
-            if (error._tag === "ThreadLaunchError" && isAboveCeilingError(error.cause)) {
+            const cause = error._tag === "ThreadLaunchError" ? error.cause : undefined;
+            if (isAboveCeilingError(cause)) {
               return new OrchestratorMcpFailure({
                 code: "invalid_request",
-                message: error.cause.message,
+                message: cause.message,
               });
             }
-            return unavailable();
+            return threadFolderRejection(cause, input.folderId) ?? unavailable();
           }),
         );
         const thread = result.projection.thread;

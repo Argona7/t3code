@@ -82,3 +82,61 @@ it("keeps draft previews current through edits, promotion and removal", async ()
   await act(() => initial.clearDraftThread(nextDraftId));
   await expect.element(row).not.toBeInTheDocument();
 });
+
+it("hides an active draft immediately when it moves out of the viewed folder", async () => {
+  const initial = useComposerDraftStore.getState();
+  using _store = {
+    [Symbol.dispose]: () => useComposerDraftStore.setState(initial, true),
+  };
+  useComposerDraftStore.setState({
+    draftsByThreadKey: {},
+    draftThreadsByThreadKey: {},
+    logicalProjectDraftThreadKeyByLogicalProjectKey: {},
+  });
+  const environmentId = EnvironmentId.make("draft-folder-environment");
+  const projectRef = scopeProjectRef(environmentId, ProjectId.make("draft-folder-project"));
+  const draftId = DraftId.make("folder-draft");
+  initial.setProjectDraftThreadId(projectRef, draftId, {
+    threadId: ThreadId.make("folder-draft-thread"),
+    folderId: "folder-a",
+  });
+  initial.setPrompt(draftId, "Draft that stays private to its folder");
+  const folders = [
+    { id: "folder-a", name: "Folder A", color: 0 },
+    { id: "folder-b", name: "Folder B", color: 1 },
+  ];
+  const onNavigateToDraft = vi.fn();
+  const onDraftContextMenu = vi.fn();
+  const renderBlock = (folderScope: string | null | undefined, visibleFolders = folders) => (
+    <ul>
+      <SidebarDraftBlock
+        projectByKey={new Map()}
+        projectDisplayNameByKey={new Map()}
+        scopedProjectKeys={null}
+        routeDraftId={draftId}
+        onNavigateToDraft={onNavigateToDraft}
+        onDraftContextMenu={onDraftContextMenu}
+        folderScope={folderScope}
+        folderScopeEnvironmentId={environmentId}
+        folders={visibleFolders}
+      />
+    </ul>
+  );
+  await using screen = await render(renderBlock("folder-a"));
+  const row = screen.getByTestId("sidebar-draft-row");
+  await expect.element(row).toBeInTheDocument();
+  await screen.getByRole("button", { name: "Draft actions" }).click();
+  expect(onDraftContextMenu).toHaveBeenCalledWith(draftId, expect.any(Object), "mouse");
+  expect(onNavigateToDraft).not.toHaveBeenCalled();
+
+  await act(() => initial.setDraftThreadFolder(draftId, "folder-b"));
+  await expect.element(row).not.toBeInTheDocument();
+  await screen.rerender(renderBlock(null));
+  await expect.element(row).not.toBeInTheDocument();
+  await screen.rerender(renderBlock("folder-b"));
+  await expect.element(row).toBeInTheDocument();
+  await screen.rerender(renderBlock(undefined));
+  await expect.element(row).toBeInTheDocument();
+  await screen.rerender(renderBlock(null, folders.slice(0, 1)));
+  await expect.element(row).toBeInTheDocument();
+});

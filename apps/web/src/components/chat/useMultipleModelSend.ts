@@ -18,6 +18,7 @@ import {
   useComposerDraftStore,
 } from "../../composerDraftStore";
 import type { ComposerHandleRef } from "../../composerHandleContext";
+import { resolveThreadFolderId } from "../../hooks/useThreadFolders";
 import { releaseDraftAttachments } from "../../lib/attachmentUploadQueue";
 import type { buildMessageContext } from "../../lib/composerContextRecords";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
@@ -151,6 +152,12 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
         useComposerDraftStore.getState().getComposerDraft(composerDraftTarget) ===
           clearedDraftSnapshot &&
         appAtomRegistry.get(fanoutSelectionsAtom) === submittedSelections;
+      const draft =
+        draftId === null ? null : useComposerDraftStore.getState().getDraftSession(draftId);
+      const folderId =
+        draft?.environmentId === environmentId
+          ? resolveThreadFolderId(environmentId, draft.folderId)
+          : null;
       setThreadError(threadId, null);
       const starts = Promise.all(
         targets.map(async (target) => {
@@ -190,6 +197,7 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
                       branch,
                       worktreePath: null,
                       createdAt: createdAt,
+                      ...(folderId !== null ? { folderId } : {}),
                     },
                     prepareWorktree: {
                       projectCwd: project.workspaceRoot,

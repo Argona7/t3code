@@ -1,5 +1,6 @@
 import {
   OrchestratorMcpEnvironmentTarget,
+  OrchestratorMcpThreadFolderListResult,
   ScheduledTaskId,
   ScheduledTask,
   OrchestrationSearchThreadsInput,
@@ -29,6 +30,21 @@ import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTaskService from "../../../scheduledTasks/ScheduledTaskService.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+
+const ThreadFolderListTool = Tool.make("t3_thread_folder_list", {
+  description: "List names and IDs for `folderId` in this environment.",
+  parameters: Schema.Struct({ environmentId: OrchestratorMcpEnvironmentTarget }),
+  success: OrchestratorMcpThreadFolderListResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies: [
+    McpInvocationContext.McpInvocationContext,
+    ThreadManagementService.ThreadManagementService,
+  ],
+})
+  .annotate(Tool.Title, "List thread folders")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false);
 
 const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
   description:
@@ -242,6 +258,7 @@ const ScheduledTaskRunTool = Tool.make("run_scheduled_task_now", {
   .annotate(Tool.OpenWorld, true);
 
 export const ThreadToolkit = Toolkit.make(
+  ThreadFolderListTool,
   ScheduledTaskRunTool,
   ThreadSearchTool,
   ThreadConfigureTool,

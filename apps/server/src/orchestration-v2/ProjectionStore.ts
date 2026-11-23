@@ -497,6 +497,7 @@ export type ActiveThreadListEntry = Pick<
 export interface OlderSettledThreadsQuery {
   readonly before: OrchestrationV2OlderSettledCursor;
   readonly projectIds?: ReadonlyArray<ProjectId> | undefined;
+  readonly folderId?: string | null | undefined;
   readonly limit: number;
 }
 
@@ -9139,7 +9140,13 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
 
     const listOlderSettledThreads: ProjectionStoreV2Shape["listOlderSettledThreads"] = Effect.fn(
       "ProjectionStore.listOlderSettledThreads",
-    )(function* ({ before, projectIds, limit }) {
+    )(function* ({ before, projectIds, folderId, limit }) {
+      const folderFilter =
+        folderId === undefined
+          ? sql``
+          : folderId === null
+            ? sql` AND NOT EXISTS (SELECT 1 FROM argona_thread_folder_assignments a WHERE a.thread_id = t.thread_id)`
+            : sql` AND EXISTS (SELECT 1 FROM argona_thread_folder_assignments a WHERE a.thread_id = t.thread_id AND a.folder_id = ${folderId})`;
       // ISO strings in one format, so string order is time order.
       const older = sql`
         SELECT t.thread_id, t.project_id,
@@ -9152,7 +9159,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           AND json_extract(t.payload_json, '$.settledOverride') = 'settled'
           AND json_extract(t.payload_json, '$.settledAt') IS NOT NULL${
             projectIds === undefined ? sql`` : sql` AND t.project_id IN ${sql.in(projectIds)}`
-          }
+          }${folderFilter}
       `;
       const belowCursor =
         before.threadId === undefined

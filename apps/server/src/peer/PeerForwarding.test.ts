@@ -26,6 +26,7 @@ import * as ServerConfig from "../config.ts";
 import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadSearch from "../orchestration-v2/ThreadSearch.ts";
+import * as ThreadFolders from "../threadFolders.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as SourceControlRepositoryService from "../sourceControl/SourceControlRepositoryService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
@@ -50,6 +51,7 @@ const box = descriptorOf("environment-box", "Box");
 const boxProject = ProjectId.make("project:box");
 const boxThread = ThreadId.make("thread:box-auto");
 const boxRun = RunId.make("run:box-auto");
+const boxFolder = { id: "folder-on-box", name: "Box work", color: 0 };
 
 /** What B's thread service was asked to do. */
 interface Seen {
@@ -93,7 +95,13 @@ const boxThreads = (seen: Ref.Ref<Seen>, linkSession: Ref.Ref<string>) => {
       Effect.map((thread) => ({ thread, runs: [run("running")], runtimeRequests: [] }) as never),
     );
   return Layer.mock(ThreadManagement.ThreadManagementService)({
+    threadFolders: ThreadFolders.ThreadFolders.pipe(
+      Effect.provide(
+        Layer.mock(ThreadFolders.ThreadFolders)({ list: () => Effect.succeed([boxFolder]) }),
+      ),
+    ),
     getThreadShell: shellOf,
+    hasReceipt: () => Effect.succeed(false),
     getProjectThreadRecords: (input) => projectionOf(input.threadId),
     getThreadRecords: (threadId) => projectionOf(threadId),
     listProjectThreads: () => linked.pipe(Effect.map((shell) => [shell] as never)),
@@ -215,13 +223,13 @@ const boxProjects = (seen: Ref.Ref<Seen>) =>
  * OAuth. `linkSession` is filled in once A links, so B's fixture thread reads
  * as one that link started.
  */
-const serveBox = (seen: Ref.Ref<Seen>, linkSession: Ref.Ref<string>) =>
+const serveBox = (seen: Ref.Ref<Seen>, linkSession: Ref.Ref<string>, folders = true) =>
   servePeer(
     box,
     Layer.mergeAll(
       McpHttpServer.layerOrchestratorToolkit,
       McpHttpServer.layerProjectRegistration,
-      McpHttpServer.layerThreadToolkit,
+      folders ? McpHttpServer.layerThreadToolkit : Layer.empty,
     ).pipe(
       Layer.provide(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
       Layer.provide(NodeCrypto.layer),
@@ -519,19 +527,36 @@ it.effect("launches in a linked environment with the caller's modes, retry-safe"
           ...args,
         });
 
-      const first = yield* launch("thread:laptop-plan");
+      const catalog = yield* a.call("thread:laptop-plan", "t3_thread_folder_list", {
+        environmentId: box.environmentId,
+      });
+      expect(catalog.structuredContent).toEqual({
+        folders: [{ id: boxFolder.id, name: boxFolder.name }],
+      });
+      const first = yield* launch("thread:laptop-plan", { folderId: boxFolder.id });
       expect(first.isError).toBe(false);
       expect(first.structuredContent).toMatchObject({
         projectId: boxProject,
         modelSelection: codex,
       });
-      const retried = yield* launch("thread:laptop-plan");
+      const retried = yield* launch("thread:laptop-plan", { folderId: boxFolder.id });
       const [launched, relaunched] = (yield* Ref.get(seen)).launches;
       // The thread there runs with the caller's own modes here, below the
       // link's full access, and a retry asks for the same thread.
-      expect(launched).toMatchObject({ runtimeMode: "full-access", interactionMode: "plan" });
+      expect(launched).toMatchObject({
+        folderId: boxFolder.id,
+        runtimeMode: "full-access",
+        interactionMode: "plan",
+      });
+      expect(launched?.inheritFolderFromThreadId).toBeUndefined();
       expect(relaunched?.threadId).toBe(launched?.threadId);
       expect(retried.structuredContent).toEqual(first.structuredContent);
+
+      const invalidFolder = yield* launch("thread:laptop-plan", {
+        clientRequestId: "invalid-folder",
+        folderId: "folder-on-laptop",
+      });
+      expect(failureOf(invalidFolder)).toMatchObject({ code: "invalid_request" });
 
       // An escalation past the caller's own modes is refused here.
       const escalated = yield* launch("thread:laptop-plan", { interactionMode: "default" });
@@ -547,6 +572,36 @@ it.effect("launches in a linked environment with the caller's modes, retry-safe"
       expect(failureOf(withUpload)).toMatchObject({ code: "invalid_request" });
       expect(yield* Ref.get(b.bearers)).toEqual([]);
       expect((yield* Ref.get(seen)).launches).toHaveLength(2);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("protects folder assignments on a linked environment predating folders", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const seen = yield* Ref.make<Seen>(nothingSeen);
+      const b = yield* serveBox(seen, yield* Ref.make(""), false);
+      const a = yield* makeLaptop;
+      yield* linkTo(a.links, b, "full-access");
+      const launch = (args: { readonly folderId?: string | null }) =>
+        a.call("thread:laptop-full", "t3_thread_launch", {
+          environmentId: box.environmentId,
+          projectId: boxProject,
+          title: "Run the suite there",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+          ...args,
+        });
+
+      const assigned = yield* launch({ folderId: boxFolder.id });
+      expect(assigned.isError).toBe(true);
+      expect(failureOf(assigned)?.message).toContain("verify folder support");
+      expect((yield* Ref.get(seen)).launches).toEqual([]);
+      expect((yield* launch({ folderId: null })).isError).toBe(false);
+      expect((yield* launch({})).isError).toBe(false);
+      expect((yield* Ref.get(seen)).launches.map(({ folderId }) => folderId)).toEqual([
+        undefined,
+        undefined,
+      ]);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

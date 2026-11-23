@@ -47,6 +47,7 @@ import {
   CircleDashedIcon,
   CircleDotDashedIcon,
   ClockIcon,
+  FolderInputIcon,
   GitBranchIcon,
   MessageCircleQuestionIcon,
   PinIcon,
@@ -594,6 +595,7 @@ type SidebarThreadRowProps = {
     position: { x: number; y: number },
     source: ContextMenuSource,
   ) => void;
+  onFolderMenu?: SidebarThreadRowProps["onContextMenu"] | undefined;
   onSettle: (threadRef: ScopedThreadRef) => void;
   onActionSweepStart: (
     threadRef: ScopedThreadRef,
@@ -869,6 +871,27 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     event.preventDefault();
     onContextMenu(threadRef, { x: event.clientX, y: event.clientY }, contextMenuSourceOf(event));
   };
+  const folderMenuButton =
+    props.onFolderMenu && !isRenaming && !props.sortable?.isDragging ? (
+      <button
+        type="button"
+        aria-label={`Move ${thread.title} to a folder`}
+        aria-haspopup="menu"
+        className="inline-flex w-6 shrink-0 cursor-pointer items-center justify-center self-stretch rounded-md text-sidebar-muted-foreground outline-none hover:bg-sidebar-row-hover hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
+          const rect = event.currentTarget.getBoundingClientRect();
+          props.onFolderMenu?.(
+            threadRef,
+            { x: rect.left, y: rect.bottom },
+            contextMenuSourceOf(event),
+          );
+        }}
+      >
+        <FolderInputIcon aria-hidden className="size-3.5" />
+      </button>
+    ) : null;
   const handleKeyDown = (event: ReactKeyboardEvent) => {
     if (event.target !== event.currentTarget) return;
     if (
@@ -1412,6 +1435,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 </span>
               )}
               {props.sweepAction !== null ? dragDestination : null}
+              {folderMenuButton}
             </div>
             {multiline ? metaLine : null}
           </TooltipTrigger>
@@ -1611,6 +1635,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 </span>
               )}
               {props.sweepAction !== null ? dragDestination : null}
+              {folderMenuButton}
             </div>
             <div className="mt-1 flex min-w-0 items-center gap-1.5">
               {title}

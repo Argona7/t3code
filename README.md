@@ -39,6 +39,9 @@ It works with Claude Code, Codex, Cursor, OpenCode, Grok Build, Antigravity, Kir
 
 ## Install
 
+For the `Argona7/t3code` fork, follow the [fork build and update guide](./docs/operations/fork.md)
+to install the version with thread folders.
+
 ### Desktop app
 
 [Download T3 Code](https://t3.codes/download) for macOS, Windows, or Linux. You can also use a package manager:

@@ -3086,6 +3086,9 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("thread.create"),
+    folderId: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+    inheritFolderFromThreadId: Schema.optional(ThreadId),
+    allowMissingFolder: Schema.optional(Schema.Boolean),
     ...OrchestrationV2CreationFields,
     commandId: CommandId,
     threadId: ThreadId,
@@ -3525,6 +3528,7 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("delegated_task.request"),
+    folderId: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
     ...OrchestrationV2CreationFields,
     commandId: CommandId,
     parentThreadId: ThreadId,
@@ -3888,6 +3892,9 @@ export const OrchestrationV2ArchivedShellSnapshot = Schema.Struct({
 export type OrchestrationV2ArchivedShellSnapshot = typeof OrchestrationV2ArchivedShellSnapshot.Type;
 
 export const OrchestrationV2ThreadLaunchInput = Schema.Struct({
+  folderId: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  /** A draft can outlive its folder on another client. */
+  allowMissingFolder: Schema.optional(Schema.Boolean),
   commandId: CommandId,
   creationSource: Schema.optional(OrchestrationV2CreationSource),
   threadId: Schema.optional(ThreadId),
@@ -4026,6 +4033,8 @@ export const OrchestrationV2GetOlderSettledThreadsInput = Schema.Struct({
   before: OrchestrationV2OlderSettledCursor,
   /** Every project when absent. */
   projectIds: Schema.optionalKey(Schema.Array(ProjectId)),
+  /** Every folder when absent, or only unassigned threads when null. */
+  folderId: Schema.optionalKey(Schema.NullOr(Schema.String)),
   /** 0 reads only the counts. */
   limit: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 50 })),
 });

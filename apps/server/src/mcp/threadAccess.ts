@@ -14,8 +14,12 @@ import {
 } from "@t3tools/contracts";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 
-import type { OrchestratorV2Error } from "../orchestration-v2/Orchestrator.ts";
+import {
+  OrchestratorCommandPreviouslyRejectedError,
+  type OrchestratorV2Error,
+} from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import { resolveInteractionMode, resolveRuntimeMode } from "./delegatedTaskModes.ts";
 import { fencingLinkOrigin } from "./linkOrigin.ts";
@@ -73,6 +77,43 @@ export const unavailable = () =>
     code: "orchestration_error",
     message: "The operation could not be completed.",
   });
+
+const isPreviouslyRejected = Schema.is(OrchestratorCommandPreviouslyRejectedError);
+const missingThreadFolderDetail = (folderId: string) => `Thread folder ${folderId} does not exist.`;
+
+const missingThreadFolder = (folderId: string) =>
+  new OrchestratorMcpFailure({
+    code: "invalid_request",
+    message: `${missingThreadFolderDetail(folderId)} Look up folder IDs with t3_thread_folder_list.`,
+  });
+
+export function threadFolderRejection(error: unknown, folderId: string | null | undefined) {
+  return folderId != null &&
+    isPreviouslyRejected(error) &&
+    error.detail === missingThreadFolderDetail(folderId)
+    ? missingThreadFolder(folderId)
+    : undefined;
+}
+
+export const assertThreadFolders = Effect.fn("mcp.assertThreadFolders")(function* (
+  threads: Pick<
+    ThreadManagement.ThreadManagementService["Service"],
+    "threadFolders" | "hasReceipt"
+  >,
+  requested: ReadonlyArray<{ readonly folderId: string; readonly commandId: CommandId }>,
+) {
+  if (requested.length === 0) return;
+  const service = yield* threads.threadFolders;
+  const folders = yield* service.list().pipe(Effect.mapError(unavailable));
+  const known = new Set(folders.map((folder) => folder.id));
+  // Check receipts after the catalog: a concurrent first call may have committed
+  // just before its folder was removed.
+  for (const { folderId, commandId } of requested) {
+    if (!known.has(folderId) && !(yield* threads.hasReceipt(commandId))) {
+      return yield* missingThreadFolder(folderId);
+    }
+  }
+});
 
 export const dispatchFailure = (
   error: OrchestratorV2Error | ThreadManagement.ThreadManagementProviderInstanceDisabledError,

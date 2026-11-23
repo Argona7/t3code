@@ -247,6 +247,7 @@ describe("V2 environment commands", () => {
           createThread: {
             projectId: ProjectId.make("project-1"),
             title: "Thread",
+            folderId: "work",
             modelSelection: v2Projection.thread.modelSelection,
             runtimeMode: "full-access",
             interactionMode: "default",
@@ -259,6 +260,8 @@ describe("V2 environment commands", () => {
 
       expect(launches[0]).toMatchObject({
         threadId: v2ThreadId,
+        folderId: "work",
+        allowMissingFolder: true,
         title: "Continue here",
         generateTitle: true,
         workspaceStrategy: {

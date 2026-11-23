@@ -5,6 +5,7 @@ const testState = vi.hoisted(() => {
   let completeProjectFileRead: (value: null) => void = () => undefined;
   let projectFileRead = Promise.resolve<null>(null);
   let projectRemoved = false;
+  let selectedFolderId: string | null = null;
   let connectedEnvironmentIds = ["environment-primary", "environment-ssh"];
   let targetSettings = {
     defaultThreadEnvMode: "local" as "local" | "worktree" | null,
@@ -17,6 +18,7 @@ const testState = vi.hoisted(() => {
     readonly environmentId: string;
     readonly promotedTo: null;
     readonly threadId: string;
+    readonly folderId?: string;
   } | null = null;
   let openDraftRoute: { readonly kind: "draft"; readonly draftId: string } | null = null;
   let draftsWithUserText = new Set<string>();
@@ -61,6 +63,12 @@ const testState = vi.hoisted(() => {
     get projectRemoved() {
       return projectRemoved;
     },
+    get selectedFolderId() {
+      return selectedFolderId;
+    },
+    selectFolder(folderId: string | null) {
+      selectedFolderId = folderId;
+    },
     get connectedEnvironmentIds() {
       return connectedEnvironmentIds;
     },
@@ -92,6 +100,7 @@ const testState = vi.hoisted(() => {
       },
     ) {
       storedDraft = nextStoredDraft;
+      selectedFolderId = null;
       openDraftRoute = null;
       draftsWithUserText = new Set();
       projectRemoved = false;
@@ -250,6 +259,10 @@ vi.mock("../uiStateStore", () => ({
   useUiStateStore: () => [],
 }));
 vi.mock("./useSettings", () => ({ getClientSettings: () => ({}) }));
+vi.mock("./useThreadFolders", () => ({
+  getSelectedThreadFolderId: () => testState.selectedFolderId,
+  resolveThreadFolderId: (_environmentId: string, folderId: string | null) => folderId,
+}));
 
 import { resolveDefaultProjectRef, useNewThreadHandler } from "./useHandleNewThread";
 
@@ -318,6 +331,38 @@ describe.each([
 });
 
 describe("useNewThreadHandler", () => {
+  it("keeps the folder selected when a new draft was requested", async () => {
+    testState.reset(
+      {
+        draftId: "draft-existing",
+        environmentId: "environment-ssh",
+        promotedTo: null,
+        threadId: "thread-existing",
+        folderId: "other-folder",
+      },
+      { envMode: null, startFromOrigin: false },
+    );
+    testState.selectFolder("requested-folder");
+    const pendingOpen = useNewThreadHandler()({
+      environmentId: "environment-ssh",
+      projectId: "project-remote",
+    } as never);
+
+    testState.selectFolder(null);
+    testState.completeProjectFileRead(null);
+
+    await expect(pendingOpen).resolves.toEqual({
+      draftId: "draft-delayed",
+      threadId: "thread-delayed",
+    });
+    expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
+      "remote-project",
+      { environmentId: "environment-ssh", projectId: "project-remote" },
+      "draft-delayed",
+      expect.objectContaining({ folderId: "requested-folder" }),
+    );
+  });
+
   it("keeps the text of a draft that gained some while it waited", async () => {
     testState.reset(null);
     const raced = {

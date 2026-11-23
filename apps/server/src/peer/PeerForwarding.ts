@@ -2,6 +2,7 @@ import {
   type EnvironmentId,
   OrchestratorMcpFailure,
   type OrchestratorMcpEnvironmentLinksResult,
+  OrchestratorMcpThreadFolderListResult,
   OrchestratorMcpThreadInterruptInput,
   OrchestratorMcpThreadInterruptResult,
   OrchestratorMcpThreadReadInput,
@@ -181,12 +182,36 @@ const make = Effect.gen(function* () {
             threadId: caller.id,
             title: caller.title,
           };
-    return yield* peers.call({
+    const peer = {
       environmentId,
-      tool: toolName,
-      arguments: args,
       limits,
       ...(sender === undefined ? {} : { sender }),
+    };
+    // A linked launch cannot inherit across servers. Omit null so older peers can accept it too.
+    if (toolName === "t3_thread_launch" && args.folderId === null) delete args.folderId;
+    if (toolName === "t3_thread_launch" && typeof args.folderId === "string") {
+      // Older peers ignore unknown launch fields. Check support without rejecting a replay whose folder was removed.
+      yield* peers
+        .call({
+          ...peer,
+          tool: "t3_thread_folder_list",
+          arguments: {},
+          success: OrchestratorMcpThreadFolderListResult,
+        })
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new OrchestratorMcpFailure({
+                code: error.code,
+                message: `Could not verify folder support in the linked environment. ${error.message}`,
+              }),
+          ),
+        );
+    }
+    return yield* peers.call({
+      ...peer,
+      tool: toolName,
+      arguments: args,
       success: success as Schema.Decoder<A>,
     });
   });

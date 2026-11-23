@@ -1,6 +1,6 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, describe, it } from "@effect/vitest";
+import { assert, describe, it, vi } from "@effect/vitest";
 import {
   CommandId,
   ContextTransferId,
@@ -10,6 +10,7 @@ import {
   NodeId,
   ORCHESTRATOR_MCP_RUNNING_TASK_NEXT,
   type OrchestratorMcpCapabilitiesResult,
+  type OrchestratorMcpCreateThreadsResult,
   type OrchestratorMcpListScheduledTasksInput,
   type Project,
   OrchestratorMcpTarget,
@@ -2856,6 +2857,8 @@ describe("OrchestratorMcpService provider resolution", () => {
         yield* Effect.gen(function* () {
           const orchestrator = yield* Orchestrator.OrchestratorV2;
           const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+          const threads = yield* ThreadManagementService.ThreadManagementService;
+          const threadFolders = yield* threads.threadFolders;
           const settings = yield* ServerSettings.ServerSettingsService;
           yield* orchestrator.dispatch({
             type: "thread.create",
@@ -2882,6 +2885,9 @@ describe("OrchestratorMcpService provider resolution", () => {
             attachments: [],
             dispatchMode: { type: "start_immediately" },
           });
+          const inheritedFolder = yield* threadFolders.create({ name: "Parent work" });
+          const explicitFolder = yield* threadFolders.create({ name: "Separate work" });
+          yield* threadFolders.move({ threadId: parentThreadId, folderId: inheritedFolder.id });
           const request = {
             threads: [{ target: { driverKind: driver, model } }],
             clientRequestId: "create-retry",
@@ -2894,7 +2900,52 @@ describe("OrchestratorMcpService provider resolution", () => {
           assert.equal(first.threads.length, 1);
           assert.equal(child.providerInstanceId, selection.instanceId);
           assert.equal(child.model, selection.model);
+          assert.equal(
+            (yield* threadFolders.snapshot()).assignments[child.threadId],
+            inheritedFolder.id,
+          );
           assert.deepEqual(yield* service.createThreads(scope, request), first);
+
+          const explicitRequest = {
+            threads: [
+              { ...request.threads[0]!, folderId: explicitFolder.id, prompt: "Start work." },
+            ],
+            clientRequestId: "explicit-folder",
+          };
+          const explicitChild = (yield* service.createThreads(scope, explicitRequest)).threads[0]!;
+          assert.equal(
+            (yield* threadFolders.snapshot()).assignments[explicitChild.threadId],
+            explicitFolder.id,
+          );
+
+          const delegatedRequest = {
+            task: "Work in the same folder.",
+            target: request.threads[0]!.target,
+            clientRequestId: "folder-delegation",
+          };
+          const inheritedTask = yield* service.delegateTask(scope, delegatedRequest);
+          assert.equal(
+            (yield* threadFolders.snapshot()).assignments[inheritedTask.childThreadId!],
+            inheritedFolder.id,
+          );
+          const explicitTask = yield* service.delegateTask(scope, {
+            ...delegatedRequest,
+            clientRequestId: "explicit-folder-delegation",
+            folderId: explicitFolder.id,
+          });
+          assert.equal(
+            (yield* threadFolders.snapshot()).assignments[explicitTask.childThreadId!],
+            explicitFolder.id,
+          );
+          const unassignedTask = yield* service.delegateTask(scope, {
+            ...delegatedRequest,
+            clientRequestId: "unassigned-folder-delegation",
+            folderId: null,
+          });
+          assert.notProperty(
+            (yield* threadFolders.snapshot()).assignments,
+            unassignedTask.childThreadId!,
+          );
 
           // The creation receipt exists, but this prompt has not been accepted yet.
           const withPrompt = {
@@ -2927,6 +2978,64 @@ describe("OrchestratorMcpService provider resolution", () => {
               Stream.runCollect,
             );
           assert.equal(promptedCommits[0]?.commandId, promptedCommits[1]?.commandId);
+
+          const invalidBatch = {
+            threads: [
+              { ...request.threads[0]!, title: "Do not create this thread", prompt: "Start work." },
+              { ...request.threads[0]!, folderId: "missing-thread-folder" },
+            ],
+            clientRequestId: "folder-batch",
+          };
+          const invalidFolder = yield* service.createThreads(scope, invalidBatch).pipe(Effect.flip);
+          assert.equal(invalidFolder.code, "invalid_request");
+          assert.include(invalidFolder.message, "missing-thread-folder");
+          const fixedBatch = yield* service.createThreads(scope, {
+            ...invalidBatch,
+            threads: [
+              { ...request.threads[0]!, title: "Created after fixing the batch", folderId: null },
+            ],
+          });
+          assert.equal(fixedBatch.threads[0]?.title, "Created after fixing the batch");
+          assert.equal(fixedBatch.threads[0]?.runId, null);
+          assert.notProperty(
+            (yield* threadFolders.snapshot()).assignments,
+            fixedBatch.threads[0]!.threadId,
+          );
+
+          yield* threadFolders.move({ threadId: parentThreadId, folderId: explicitFolder.id });
+          assert.deepEqual(yield* service.createThreads(scope, withPrompt), started);
+          assert.equal(
+            (yield* threadFolders.snapshot()).assignments[child.threadId],
+            inheritedFolder.id,
+          );
+          yield* threadFolders.remove({ folderId: explicitFolder.id });
+          assert.equal(
+            (yield* service.createThreads(scope, explicitRequest)).threads[0]?.threadId,
+            explicitChild.threadId,
+          );
+          assert.notProperty((yield* threadFolders.snapshot()).assignments, explicitChild.threadId);
+
+          const raceFolder = yield* threadFolders.create({ name: "Concurrent creation" });
+          const concurrentRequest = {
+            threads: [{ ...request.threads[0]!, folderId: raceFolder.id }],
+            clientRequestId: "concurrent-folder-creation",
+          };
+          const concurrentResult = yield* Ref.make<OrchestratorMcpCreateThreadsResult | undefined>(
+            undefined,
+          );
+          const listFolders = threadFolders.list;
+          using _list = vi.spyOn(threadFolders, "list").mockImplementationOnce(() =>
+            service.createThreads(scope, concurrentRequest).pipe(
+              Effect.orDie,
+              Effect.tap((created) => Ref.set(concurrentResult, created)),
+              Effect.andThen(threadFolders.remove({ folderId: raceFolder.id })),
+              Effect.andThen(listFolders()),
+            ),
+          );
+          assert.deepEqual(
+            yield* service.createThreads(scope, concurrentRequest),
+            yield* Ref.get(concurrentResult),
+          );
 
           yield* settings.updateSettings({
             projectSettingsOverrides: {

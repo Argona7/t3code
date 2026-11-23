@@ -2708,7 +2708,8 @@ export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig"
     Option.getOrUndefined(env.githubRepository)?.trim() ||
     ""
   ).trim();
-  if (!rawRepo) return undefined;
+  // An inherited upstream feed could replace a fork install with the stock app.
+  if (!rawRepo || rawRepo.toLowerCase() === "pingdotgg/t3code") return undefined;
 
   const [owner, repo, ...rest] = rawRepo.split("/");
   if (!owner || !repo || rest.length > 0) return undefined;

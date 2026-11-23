@@ -38,6 +38,7 @@ export interface OlderSettled {
 export interface OlderSettledScope {
   readonly environmentId: EnvironmentId;
   readonly projectIds: ReadonlyArray<ProjectId> | null;
+  readonly folder?: { readonly id: string | null; readonly revision: number };
 }
 
 /**
@@ -72,7 +73,7 @@ export function sortOlderSettledScopes(
 ): ReadonlyArray<OlderSettledScope> {
   return scopes
     .map((scope) => ({
-      environmentId: scope.environmentId,
+      ...scope,
       projectIds: scope.projectIds === null ? null : [...scope.projectIds].sort(),
     }))
     .sort((left, right) => left.environmentId.localeCompare(right.environmentId));
@@ -240,10 +241,12 @@ export function createOlderSettledThreadAtoms<R, ER, E>(
       readonly generation: number;
       readonly before: string;
       readonly key: string;
+      readonly folder?: OlderSettledScope["folder"];
     }) {
       yield* Effect.sleep(COUNT_REREAD_DELAY);
       return yield* request(ORCHESTRATION_V2_WS_METHODS.getOlderSettledThreads, {
         before: { settledAt: input.before },
+        ...(input.folder === undefined ? {} : { folderId: input.folder.id }),
         limit: 0,
       });
     }),
@@ -259,10 +262,12 @@ export function createOlderSettledThreadAtoms<R, ER, E>(
       readonly generation: number;
       readonly projectIds: ReadonlyArray<ProjectId> | null;
       readonly before: OrchestrationV2OlderSettledCursor;
+      readonly folder?: OlderSettledScope["folder"];
     }) {
       return yield* request(ORCHESTRATION_V2_WS_METHODS.getOlderSettledThreads, {
         before: input.before,
         ...(input.projectIds === null ? {} : { projectIds: input.projectIds }),
+        ...(input.folder === undefined ? {} : { folderId: input.folder.id }),
         limit: OLDER_SETTLED_PAGE_SIZE,
       });
     }),
@@ -272,7 +277,11 @@ export function createOlderSettledThreadAtoms<R, ER, E>(
     readonly counts: OrchestrationV2OlderSettledThreadsPage["counts"];
   }) => new Map(source.counts.map(({ projectId, count }) => [projectId, count] as const));
 
-  const olderSettledAtom = Atom.family((environmentId: EnvironmentId) => {
+  const olderSettledCountAtom = Atom.family((scopeKey: string) => {
+    const [environmentId, folder] = JSON.parse(scopeKey) as [
+      EnvironmentId,
+      OlderSettledScope["folder"]?,
+    ];
     let generation = -1;
     // The key of the first state seen this generation, when that state is the snapshot itself.
     let snapshotKey: string | null = null;
@@ -290,7 +299,7 @@ export function createOlderSettledThreadAtoms<R, ER, E>(
         fromSnapshot = {
           before: cut.before,
           beforeMs: DateTime.toEpochMillis(DateTime.makeUnsafe(cut.before)),
-          counts: countsOf(cut),
+          counts: folder === undefined ? countsOf(cut) : new Map(),
         };
       }
       // Most shell updates move only the cursor; the key needs new rows or removals.
@@ -304,12 +313,13 @@ export function createOlderSettledThreadAtoms<R, ER, E>(
         lastRead = null;
       }
       // Generation 0 is a cached shell: no reads until this session's first snapshot.
-      if (key === snapshotKey || state.generation === 0) return fromSnapshot;
+      if ((folder === undefined && key === snapshotKey) || state.generation === 0)
+        return fromSnapshot;
       const read = selectEnvironmentQueryData(
         get(
           countReadAtom({
             environmentId,
-            input: { generation: state.generation, before: cut.before, key },
+            input: { generation: state.generation, before: cut.before, key, folder },
           }),
         ),
       );
@@ -318,21 +328,28 @@ export function createOlderSettledThreadAtoms<R, ER, E>(
         lastRead = { ...fromSnapshot, counts: countsOf(read) };
       }
       return lastRead ?? fromSnapshot;
-    }).pipe(Atom.withLabel(`environment-older-settled:${environmentId}`));
+    }).pipe(Atom.withLabel(`environment-older-settled:${scopeKey}`));
   });
+
+  const olderSettledAtom = (environmentId: EnvironmentId, folder?: OlderSettledScope["folder"]) =>
+    olderSettledCountAtom(
+      JSON.stringify(folder === undefined ? [environmentId] : [environmentId, folder]),
+    );
 
   const pagesKey = (scope: OlderSettledScope, pages: number) =>
     JSON.stringify([
       scope.environmentId,
       scope.projectIds === null ? null : [...scope.projectIds].sort(),
       pages,
+      ...(scope.folder === undefined ? [] : [scope.folder]),
     ]);
 
   const pagesAtom = Atom.family((key: string) => {
-    const [environmentId, projectIds, pages] = JSON.parse(key) as [
+    const [environmentId, projectIds, pages, folder] = JSON.parse(key) as [
       EnvironmentId,
       ReadonlyArray<ProjectId> | null,
       number,
+      OlderSettledScope["folder"]?,
     ];
     let previous = NO_PAGES;
     const keep = (next: OlderSettledPages): OlderSettledPages => {
@@ -359,7 +376,7 @@ export function createOlderSettledThreadAtoms<R, ER, E>(
         const result = get(
           pageReadAtom({
             environmentId,
-            input: { generation: state.generation, projectIds, before: frontier },
+            input: { generation: state.generation, projectIds, before: frontier, folder },
           }),
         );
         const page = selectEnvironmentQueryData(result);
@@ -424,17 +441,19 @@ export function createOlderSettledThreadAtoms<R, ER, E>(
 
   // One read for a shelf that spans environments: each one's cut, counts and pages.
   const shelfAtom = Atom.family((key: string) => {
-    const entries = JSON.parse(key) as ReadonlyArray<readonly [string, string]>;
+    const entries = JSON.parse(key) as ReadonlyArray<
+      readonly [EnvironmentId, string, OlderSettledScope["folder"]?]
+    >;
     let previous: ReadonlyMap<EnvironmentId, OlderSettledShelfEnvironment> = new Map();
     return Atom.make((get): ReadonlyMap<EnvironmentId, OlderSettledShelfEnvironment> => {
       const shelf = new Map<EnvironmentId, OlderSettledShelfEnvironment>();
       let changed = previous.size !== entries.length;
-      for (const [environmentId, pagesKey] of entries) {
-        const older = get(olderSettledAtom(environmentId as EnvironmentId));
+      for (const [environmentId, pagesKey, folder] of entries) {
+        const older = get(olderSettledAtom(environmentId, folder));
         const pages = get(pagesAtom(pagesKey));
-        const prior = previous.get(environmentId as EnvironmentId);
+        const prior = previous.get(environmentId);
         changed ||= prior?.older !== older || prior.pages !== pages;
-        shelf.set(environmentId as EnvironmentId, { older, pages });
+        shelf.set(environmentId, { older, pages });
       }
       if (changed) previous = shelf;
       return previous;
@@ -457,6 +476,7 @@ export function createOlderSettledThreadAtoms<R, ER, E>(
           generation: state.generation,
           projectIds: scope.projectIds === null ? null : [...scope.projectIds].sort(),
           before: result.frontier,
+          folder: scope.folder,
         },
       }),
     );
@@ -471,7 +491,11 @@ export function createOlderSettledThreadAtoms<R, ER, E>(
     ) =>
       shelfAtom(
         JSON.stringify(
-          scopes.map(({ scope, pages }) => [scope.environmentId, pagesKey(scope, pages)] as const),
+          scopes.map(({ scope, pages }) => [
+            scope.environmentId,
+            pagesKey(scope, pages),
+            ...(scope.folder === undefined ? [] : [scope.folder]),
+          ]),
         ),
       ),
     retryPages,

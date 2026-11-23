@@ -87,6 +87,9 @@ export interface ThreadLaunchInitialMessage {
 }
 
 export interface ThreadLaunchInput {
+  readonly folderId?: string | null;
+  readonly inheritFolderFromThreadId?: ThreadId;
+  readonly allowMissingFolder?: boolean;
   readonly commandId: CommandId;
   readonly threadId?: ThreadId;
   readonly reuseExistingThread?: boolean;
@@ -1300,6 +1303,11 @@ const make = Effect.gen(function* () {
               })
             : threads.dispatch({
                 type: "thread.create",
+                ...(input.folderId === undefined ? {} : { folderId: input.folderId }),
+                ...(input.inheritFolderFromThreadId === undefined
+                  ? {}
+                  : { inheritFolderFromThreadId: input.inheritFolderFromThreadId }),
+                ...(input.allowMissingFolder === true ? { allowMissingFolder: true } : {}),
                 commandId: input.commandId,
                 threadId: candidateThreadId,
                 projectId: input.projectId,

@@ -21,6 +21,7 @@ import {
   type EnvironmentId,
   type ResolvedKeybindingsConfig,
   type ScopedThreadRef,
+  type ThreadFolder,
   type ThreadId,
 } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
@@ -53,6 +54,7 @@ import { isModelPickerOpen, subscribeToModelPickerVisibility } from "../modelPic
 import { shortcutModifierStore } from "../shortcutModifierState";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { selectActiveRightPanel, useRightPanelStore } from "../rightPanelStore";
+import type { ThreadFolderDestinationMenuId } from "./threadActionMenu.logic";
 
 export function shouldNavigateAfterThreadPark(input: {
   readonly threadKey: string;
@@ -605,6 +607,53 @@ export function filterSidebarV2VisibleThreads<
       (scopedProjectKeys === null ||
         scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
   );
+}
+
+export interface SidebarThreadFolderScope {
+  readonly environmentId: EnvironmentId;
+  readonly folderId: string | null;
+  readonly assignments: Readonly<Record<string, string>>;
+}
+
+const MOVE_TO_FOLDER_PREFIX = "move-to-folder:";
+
+export function threadFolderAssignment(
+  assignments: Readonly<Record<string, string>>,
+  threadId: string,
+) {
+  return Object.hasOwn(assignments, threadId) ? (assignments[threadId] ?? null) : null;
+}
+
+export function filterSidebarThreadsByFolder<
+  T extends { readonly environmentId: EnvironmentId; readonly id: string },
+>(threads: readonly T[], scope: SidebarThreadFolderScope | undefined): readonly T[] {
+  if (scope === undefined) return threads;
+  return threads.filter((thread) => {
+    if (thread.environmentId !== scope.environmentId) return scope.folderId === null;
+    return threadFolderAssignment(scope.assignments, thread.id) === scope.folderId;
+  });
+}
+
+export function threadFolderDestinations(
+  folders: readonly ThreadFolder[],
+  currentFolderId: string | null,
+): readonly ContextMenuItem<ThreadFolderDestinationMenuId>[] {
+  return [{ id: null, name: "All" }, ...folders].map(({ id, name }) => ({
+    id: `${MOVE_TO_FOLDER_PREFIX}${id ?? ""}`,
+    label: name,
+    checked: id === currentFolderId,
+    disabled: id === currentFolderId,
+  }));
+}
+
+export function readThreadFolderDestination(
+  menuValue: string | null,
+  folders: readonly ThreadFolder[],
+): string | null | undefined {
+  if (!menuValue?.startsWith(MOVE_TO_FOLDER_PREFIX)) return undefined;
+  const folderId = menuValue.slice(MOVE_TO_FOLDER_PREFIX.length);
+  if (folderId.length === 0) return null;
+  return folders.some((folder) => folder.id === folderId) ? folderId : undefined;
 }
 
 export function buildBulkTitleRegenerationContextMenuItem(input: {

@@ -408,6 +408,7 @@ const PersistedDraftThreadState = Schema.Struct({
   environmentId: Schema.String,
   projectId: ProjectId,
   logicalProjectKey: Schema.optionalKey(Schema.String),
+  folderId: Schema.optionalKey(Schema.NullOr(Schema.String)),
   environmentSelection: Schema.optionalKey(Schema.Literals(["auto", "manual"])),
   loadBalancedEnvironmentId: Schema.optionalKey(Schema.NullOr(Schema.String)),
   createdAt: Schema.String,
@@ -507,6 +508,7 @@ export interface DraftSessionState {
   environmentId: EnvironmentId;
   projectId: ProjectId;
   logicalProjectKey: string;
+  folderId: string | null;
   environmentSelection?: "auto" | "manual";
   loadBalancedEnvironmentId?: EnvironmentId | null;
   createdAt: string;
@@ -591,6 +593,7 @@ interface ComposerDraftStoreState {
       environmentSelection?: "auto" | "manual";
       loadBalancedEnvironmentId?: EnvironmentId | null;
       checkoutPullRequest?: DraftCheckoutPullRequest | null;
+      folderId?: string | null;
     },
   ) => void;
   setProjectDraftThreadId: (
@@ -608,6 +611,7 @@ interface ComposerDraftStoreState {
       environmentSelection?: "auto" | "manual";
       loadBalancedEnvironmentId?: EnvironmentId | null;
       checkoutPullRequest?: DraftCheckoutPullRequest | null;
+      folderId?: string | null;
     },
   ) => void;
   setDraftThreadContext: (
@@ -626,6 +630,7 @@ interface ComposerDraftStoreState {
       checkoutPullRequest?: DraftCheckoutPullRequest | null;
     },
   ) => void;
+  setDraftThreadFolder: (draftId: DraftId, folderId: string | null) => void;
   clearProjectDraftThreadId: (projectRef: ScopedProjectRef) => void;
   clearProjectDraftThreadById: (
     projectRef: ScopedProjectRef,
@@ -1697,6 +1702,7 @@ function createDraftThreadState(
     environmentSelection?: "auto" | "manual";
     loadBalancedEnvironmentId?: EnvironmentId | null;
     checkoutPullRequest?: DraftCheckoutPullRequest | null;
+    folderId?: string | null;
   },
 ): DraftThreadState {
   const projectChanged =
@@ -1731,6 +1737,12 @@ function createDraftThreadState(
     environmentId: projectRef.environmentId,
     projectId: projectRef.projectId,
     logicalProjectKey,
+    folderId:
+      options?.folderId !== undefined
+        ? options.folderId
+        : existingThread?.environmentId === projectRef.environmentId
+          ? existingThread.folderId
+          : null,
     ...(environmentSelection ? { environmentSelection } : {}),
     ...(options?.loadBalancedEnvironmentId !== undefined
       ? { loadBalancedEnvironmentId: options.loadBalancedEnvironmentId }
@@ -1793,6 +1805,7 @@ function draftThreadsEqual(left: DraftThreadState | undefined, right: DraftThrea
     left.environmentId === right.environmentId &&
     left.projectId === right.projectId &&
     left.logicalProjectKey === right.logicalProjectKey &&
+    left.folderId === right.folderId &&
     left.environmentSelection === right.environmentSelection &&
     left.loadBalancedEnvironmentId === right.loadBalancedEnvironmentId &&
     left.createdAt === right.createdAt &&
@@ -1942,6 +1955,11 @@ function normalizePersistedDraftThreads(
         threadId,
         environmentId: normalizedEnvironmentId,
         projectId: projectId as ProjectId,
+        folderId:
+          typeof candidateDraftThread.folderId === "string" &&
+          candidateDraftThread.folderId.length > 0
+            ? candidateDraftThread.folderId
+            : null,
         logicalProjectKey:
           typeof candidateDraftThread.logicalProjectKey === "string" &&
           candidateDraftThread.logicalProjectKey.length > 0
@@ -2729,6 +2747,7 @@ function toHydratedDraftThreadState(
     threadId: persistedDraftThread.threadId,
     environmentId: persistedDraftThread.environmentId as EnvironmentId,
     projectId: persistedDraftThread.projectId,
+    folderId: persistedDraftThread.folderId ?? null,
     logicalProjectKey:
       persistedDraftThread.logicalProjectKey ??
       projectDraftKey(
@@ -3025,6 +3044,8 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               environmentId: nextProjectRef.environmentId,
               projectId: nextProjectRef.projectId,
               logicalProjectKey: existing.logicalProjectKey,
+              folderId:
+                nextProjectRef.environmentId === existing.environmentId ? existing.folderId : null,
               ...(environmentSelection ? { environmentSelection } : {}),
               loadBalancedEnvironmentId:
                 options.loadBalancedEnvironmentId === undefined
@@ -3046,25 +3067,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               ...(checkoutPullRequest ? { checkoutPullRequest } : {}),
               promotedTo: existing.promotedTo ?? null,
             };
-            const isUnchanged =
-              nextDraftThread.environmentId === existing.environmentId &&
-              nextDraftThread.projectId === existing.projectId &&
-              nextDraftThread.logicalProjectKey === existing.logicalProjectKey &&
-              nextDraftThread.environmentSelection === existing.environmentSelection &&
-              nextDraftThread.loadBalancedEnvironmentId === existing.loadBalancedEnvironmentId &&
-              nextDraftThread.createdAt === existing.createdAt &&
-              nextDraftThread.runtimeMode === existing.runtimeMode &&
-              nextDraftThread.interactionMode === existing.interactionMode &&
-              nextDraftThread.branch === existing.branch &&
-              nextDraftThread.worktreePath === existing.worktreePath &&
-              nextDraftThread.envMode === existing.envMode &&
-              nextDraftThread.startFromOrigin === existing.startFromOrigin &&
-              checkoutPullRequestsEqual(
-                nextDraftThread.checkoutPullRequest,
-                existing.checkoutPullRequest,
-              ) &&
-              scopedThreadRefsEqual(nextDraftThread.promotedTo, existing.promotedTo);
-            if (isUnchanged) {
+            if (draftThreadsEqual(existing, nextDraftThread)) {
               return state;
             }
             return {
@@ -3075,6 +3078,18 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             };
           });
         },
+        setDraftThreadFolder: (draftId, folderId) =>
+          set((state) => {
+            const draft = state.draftThreadsByThreadKey[draftId];
+            if (!draft || isDraftThreadPromoting(draft) || draft.folderId === folderId)
+              return state;
+            return {
+              draftThreadsByThreadKey: {
+                ...state.draftThreadsByThreadKey,
+                [draftId]: { ...draft, folderId },
+              },
+            };
+          }),
         clearProjectDraftThreadId: (projectRef) => {
           set((state) => {
             const matchingThreadKeys = Object.entries(state.draftThreadsByThreadKey)

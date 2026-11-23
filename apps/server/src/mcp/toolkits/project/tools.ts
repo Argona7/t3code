@@ -17,6 +17,7 @@ import {
   ProjectId,
   OrchestratorMcpClientRequestId,
   OrchestratorMcpEnvironmentTarget,
+  OrchestratorMcpFolderTarget,
   OrchestratorMcpFailure,
   SourceControlCloneRepositoryInput,
   SourceControlCloneRepositoryResult,
@@ -133,6 +134,7 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     projectId: Schema.optional(ProjectId),
+    folderId: OrchestratorMcpFolderTarget,
     scratch: Schema.optional(
       Schema.Boolean.annotate({
         description:

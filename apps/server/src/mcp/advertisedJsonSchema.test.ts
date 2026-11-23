@@ -1,16 +1,18 @@
 import { expect, it } from "@effect/vitest";
+import { OrchestratorMcpFolderTarget } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { Tool } from "effect/ai";
 
 import { advertisedJsonSchema } from "./advertisedJsonSchema.ts";
 import { ThemeToolkit } from "./toolkits/theme/tools.ts";
 
-it("drops JSON noise, merges tagged unions, and keeps null where it is required", () => {
+it("drops JSON noise, merges tagged unions, and keeps intentional null choices", () => {
   const Every = Schema.Struct({ ms: Schema.Int });
   const tool = Tool.make("example", {
     parameters: Schema.Struct({
       threadId: Schema.optional(Schema.NullOr(Schema.String)),
       beforeRunId: Schema.NullOr(Schema.String),
+      folderId: OrchestratorMcpFolderTarget,
       limit: Schema.optional(Schema.Int),
       every: Schema.Union([Every, Schema.fromJsonString(Every)]),
       target: Schema.optional(
@@ -29,6 +31,10 @@ it("drops JSON noise, merges tagged unions, and keeps null where it is required"
     properties: {
       threadId: { type: "string" },
       beforeRunId: { anyOf: [{ type: "string" }, { type: "null" }] },
+      folderId: {
+        description: expect.stringContaining("inherit"),
+        anyOf: [{ type: "string" }, { type: "null", description: "Use All (unassigned)." }],
+      },
       limit: { type: "integer" },
       every: { type: "object", properties: { ms: { type: "integer" } }, required: ["ms"] },
       target: {

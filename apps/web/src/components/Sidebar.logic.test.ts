@@ -10,6 +10,7 @@ import {
   shouldCreateNewThreadInCurrentProject,
   deleteSelectedThreadEntries,
   getFallbackThreadIdAfterDelete,
+  filterSidebarThreadsByFolder,
   hasUnseenCompletion,
   orderItemsByPreferredIds,
   pinOrderKeyBetween,
@@ -60,6 +61,28 @@ import {
 } from "./sidebar/routeReveal";
 
 const localEnvironmentId = EnvironmentId.make("environment-local");
+
+it("filters every thread section by server assignment and leaves the global view intact", () => {
+  const remoteEnvironmentId = EnvironmentId.make("environment-remote");
+  const threads = [
+    { id: "unfiled", environmentId: localEnvironmentId, pinnedAt: null },
+    { id: "pinned", environmentId: localEnvironmentId, pinnedAt: "2026-01-01T00:00:00Z" },
+    { id: "snoozed", environmentId: localEnvironmentId, snoozedAt: "2026-01-01T00:00:00Z" },
+    { id: "pinned", environmentId: remoteEnvironmentId, pinnedAt: "2026-01-01T00:00:00Z" },
+  ];
+  const scope = {
+    environmentId: localEnvironmentId,
+    assignments: { pinned: "work", snoozed: "other" },
+  };
+  expect(filterSidebarThreadsByFolder(threads, { ...scope, folderId: "work" })).toEqual([
+    threads[1],
+  ]);
+  expect(filterSidebarThreadsByFolder(threads, { ...scope, folderId: null })).toEqual([
+    threads[0],
+    threads[3],
+  ]);
+  expect(filterSidebarThreadsByFolder(threads, undefined)).toBe(threads);
+});
 
 describe("deleteSelectedThreadEntries", () => {
   const entries = [{ threadKey: "one" }, { threadKey: "two" }, { threadKey: "three" }] as const;

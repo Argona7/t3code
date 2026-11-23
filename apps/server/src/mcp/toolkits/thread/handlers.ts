@@ -107,6 +107,14 @@ const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A,
 ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
 
 export const layer = McpToolAccess.toLayer(ThreadToolkit, {
+  t3_thread_folder_list: McpToolAccess.reads(() =>
+    Effect.gen(function* () {
+      const { threads } = yield* readCaller();
+      const service = yield* threads.threadFolders;
+      const folders = yield* service.list().pipe(Effect.mapError(unavailable));
+      return { folders: folders.map(({ id, name }) => ({ id, name })) };
+    }),
+  ),
   run_scheduled_task_now: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {
       const scheduler = yield* ScheduledTasks.ScheduledTaskService;

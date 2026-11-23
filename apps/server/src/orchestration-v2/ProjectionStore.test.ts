@@ -47,6 +47,7 @@ import { projectThreadAwarenessV2 } from "@t3tools/shared/agentAwareness";
 import { MCP_APP_OUTPUT_KEY } from "@t3tools/shared/mcpApp";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import { initializeThreadFolderSchema } from "../persistence/threadFolderSchema.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import {
@@ -3155,6 +3156,23 @@ it.effect("SQL list older settled threads below a cursor", () =>
       threadIds: [],
       counts: [{ projectId: ProjectId.make("project:b"), count: 1 }],
     });
+    yield* initializeThreadFolderSchema;
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`INSERT INTO argona_thread_folders (id, name, color) VALUES ('work', 'Work', 0)`;
+    yield* sql`INSERT INTO argona_thread_folder_assignments (thread_id, folder_id) VALUES (${id("b")}, 'work'), (${id("d")}, 'work')`;
+    assert.deepEqual(
+      (yield* store.listOlderSettledThreads({ before, folderId: null, limit: 10 })).threadIds,
+      [id("a"), id("c"), id("snoozed")],
+    );
+    assert.deepEqual(
+      yield* store.listOlderSettledThreads({
+        before,
+        folderId: "work",
+        projectIds: [ProjectId.make("project:b")],
+        limit: 0,
+      }),
+      scoped,
+    );
   }).pipe(Effect.provide(layerTest)),
 );
 

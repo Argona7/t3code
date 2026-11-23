@@ -50,6 +50,8 @@ import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAda
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
+import * as ThreadSearch from "../orchestration-v2/ThreadSearch.ts";
+import * as ThreadFolders from "../threadFolders.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProviderReplayHarness from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -78,13 +80,14 @@ import * as PeerLinkRequests from "./PeerLinkRequests.ts";
 const laptop = descriptorOf("environment-laptop", "Laptop");
 const box = descriptorOf("environment-box", "Box");
 const boxProject = ProjectId.make("project:box");
+const boxFolder = { id: "folder:box", name: "Box work", color: 0 };
 const instanceId = ProviderInstanceId.make("codex");
 const driver = ProviderDriverKind.make("codex");
 const modelSelection = { instanceId, model: "gpt-5.4" };
 
 type LaunchedWith = Pick<
   ThreadLaunch.ThreadLaunchInput,
-  "modelSelection" | "runtimeMode" | "interactionMode"
+  "modelSelection" | "runtimeMode" | "interactionMode" | "folderId"
 >;
 
 /** The thread the box launches for the task, which the test finishes. */
@@ -277,6 +280,11 @@ const boxToolkitLayer = (thread: BoxThread) => {
       }
     });
   const layerBoxThreads = Layer.mock(ThreadManagement.ThreadManagementService)({
+    threadFolders: ThreadFolders.ThreadFolders.pipe(
+      Effect.provide(
+        Layer.mock(ThreadFolders.ThreadFolders)({ list: () => Effect.succeed([boxFolder]) }),
+      ),
+    ),
     getThreadShell: shellOf,
     getProjectThreadRecords: (input) => projectionOf(input.threadId),
     getThreadRecords: (threadId) => projectionOf(threadId),
@@ -513,6 +521,7 @@ const boxToolkitLayer = (thread: BoxThread) => {
                 modelSelection: input.modelSelection,
                 runtimeMode: input.runtimeMode,
                 interactionMode: input.interactionMode,
+                ...(input.folderId === undefined ? {} : { folderId: input.folderId }),
               }),
             ),
             Effect.andThen(Effect.flatten(Ref.get(thread.afterLaunch))),
@@ -542,9 +551,10 @@ const boxToolkitLayer = (thread: BoxThread) => {
         ),
       ),
   });
-  return Layer.merge(
+  return Layer.mergeAll(
     McpHttpServer.layerOrchestratorToolkit,
     McpHttpServer.layerProjectRegistration,
+    McpHttpServer.layerThreadToolkit,
   ).pipe(
     Layer.provide(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
     Layer.provide(NodeCrypto.layer),
@@ -574,7 +584,12 @@ const boxToolkitLayer = (thread: BoxThread) => {
         list: () => Effect.succeed([boxClaude.instanceId]),
       }),
     ),
-    Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
+    Layer.provide(
+      Layer.merge(
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        Layer.mock(ThreadSearch.ThreadSearch)({}),
+      ),
+    ),
     Layer.provide(
       Layer.mock(ProjectService.ProjectService)({
         getById: (id) =>
@@ -868,7 +883,10 @@ const seedParent = (
     });
   });
 
-const delegateToBox = (laptopEnv: Effect.Success<ReturnType<typeof makeLaptop>>) =>
+const delegateToBox = (
+  laptopEnv: Effect.Success<ReturnType<typeof makeLaptop>>,
+  folderId?: string,
+) =>
   laptopEnv
     .call("delegate_task", {
       task: "Run the full suite on the box.",
@@ -879,6 +897,7 @@ const delegateToBox = (laptopEnv: Effect.Success<ReturnType<typeof makeLaptop>>)
       },
       mode: "async",
       clientRequestId: "suite-on-box",
+      ...(folderId === undefined ? {} : { folderId }),
     })
     .pipe(
       Effect.map((result) => {
@@ -929,7 +948,7 @@ it.effect("a task delegated to the box wakes the laptop's parent when it ends th
       yield* linkTo(a.links, b, "full-access");
       yield* seedParent(a);
 
-      const delegated = yield* delegateToBox(a);
+      const delegated = yield* delegateToBox(a, boxFolder.id);
       expect(delegated).toMatchObject({
         status: "running",
         childThreadId: null,
@@ -937,6 +956,7 @@ it.effect("a task delegated to the box wakes the laptop's parent when it ends th
       });
       // The box launched it in the project with the same repository.
       expect(yield* Ref.get(thread.launched)).toBe(delegated.remoteChild.threadId);
+      expect((yield* Ref.get(thread.launchedWith))?.folderId).toBe(boxFolder.id);
       // Its link opens the thread there, so the parent can mention it like any other.
       expect(delegated.link).toBe(
         `[Laptop parent](t3-thread://v2/${box.environmentId}/${delegated.remoteChild.threadId})`,
@@ -948,7 +968,7 @@ it.effect("a task delegated to the box wakes the laptop's parent when it ends th
         title: "Laptop parent",
       });
       // A retry with the same key launches nothing new and records nothing new.
-      const retried = yield* delegateToBox(a);
+      const retried = yield* delegateToBox(a, boxFolder.id);
       expect(retried.taskId).toBe(delegated.taskId);
       expect((yield* a.orchestrator.getThreadProjection(parentThreadId)).subagents).toHaveLength(1);
 

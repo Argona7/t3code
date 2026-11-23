@@ -87,6 +87,8 @@ export function withCreationProvenance(
     case "thread.create": {
       // Only the server stamps a link's origin or folds in a first message, so a client cannot.
       const {
+        inheritFolderFromThreadId: _inheritFolderFromThreadId,
+        allowMissingFolder: _allowMissingFolder,
         linkOrigin: _linkOrigin,
         delegatedFrom: _delegatedFrom,
         initialMessage: _initialMessage,
@@ -439,6 +441,7 @@ export interface ThreadManagementServiceShape {
       "location" | "projectId" | "unsettledOnly" | "worktreePath" | "threadIds"
     >,
   ) => Effect.Effect<OrchestrationV2ThreadShellSnapshot, Orchestrator.OrchestratorV2Error>;
+  readonly threadFolders: Orchestrator.OrchestratorV2Shape["threadFolders"];
   readonly listActiveSubagentThreadIds: Orchestrator.OrchestratorV2["Service"]["listActiveSubagentThreadIds"];
   readonly countThreads: Orchestrator.OrchestratorV2["Service"]["countThreads"];
   readonly listActiveShellIndex: Orchestrator.OrchestratorV2["Service"]["listActiveShellIndex"];
@@ -1680,6 +1683,7 @@ const make = Effect.gen(function* () {
   });
 
   return ThreadManagementService.of({
+    threadFolders: orchestrator.threadFolders,
     ensureLegacyTranscript,
     searchThreadStream: (input) =>
       Stream.unwrap(

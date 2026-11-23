@@ -210,6 +210,7 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
     );
     if (!target?.projectId) return;
     const draft = getDraftSession(draftId);
+    if (draft?.folderId) return;
     if (draft) carryFanoutSelections(draft, target.environmentId);
     setDraftThreadContext(draftId, {
       projectRef: scopeProjectRef(target.environmentId, target.projectId),

@@ -1932,6 +1932,45 @@ it.effect.each(["failed", "interrupted"] as const)(
   },
 );
 
+it.effect("commits a draft folder with its first run and preserves manual moves on replay", () => {
+  const harness = makeHarness();
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const folders = yield* threads.threadFolders;
+    const folder = yield* folders.create({ name: "Work" });
+    const input = {
+      ...launchInput({ command: "folder-launch", thread: "draft", message: "First message" }),
+      folderId: folder.id,
+    };
+    const first = yield* launches.launch(input);
+    assert.lengthOf(first.projection.runs, 1);
+    assert.equal((yield* folders.snapshot()).assignments[first.threadId], folder.id);
+    yield* folders.remove({ folderId: folder.id });
+    const replay = yield* launches.launch(input);
+    assert.isTrue(replay.resumed);
+    assert.notProperty((yield* folders.snapshot()).assignments, first.threadId);
+    const unknown = {
+      ...launchInput({ command: "unknown-folder", thread: "never-started", message: "Do not run" }),
+      folderId: folder.id,
+    };
+    const rejected = yield* launches.launch(unknown).pipe(Effect.flip);
+    assert.equal(rejected._tag, "ThreadLaunchError");
+    const sql = yield* SqlClient.SqlClient;
+    assert.lengthOf(
+      yield* sql`SELECT 1 FROM orchestration_v2_projection_threads WHERE thread_id = ${unknown.threadId}`,
+      0,
+    );
+    const staleDraft = yield* launches.launch({
+      ...unknown,
+      commandId: CommandId.make("stale-draft"),
+      allowMissingFolder: true,
+    });
+    assert.lengthOf(staleDraft.projection.runs, 1);
+    assert.notProperty((yield* folders.snapshot()).assignments, staleDraft.threadId);
+  }).pipe(Effect.provide(harness.layer));
+});
+
 it.effect("replays a server-allocated launch", () =>
   Effect.gen(function* () {
     const setupEntered = yield* Deferred.make<void>();

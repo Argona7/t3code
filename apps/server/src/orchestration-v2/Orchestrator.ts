@@ -387,6 +387,7 @@ export interface OrchestratorV2DispatchResult {
 }
 
 export interface OrchestratorV2Shape {
+  readonly threadFolders: EventSinkV2["Service"]["threadFolders"];
   readonly resumeQueuedRuns: Effect.Effect<number, OrchestratorV2Error>;
   readonly recoverDelegatedTasks: Effect.Effect<void>;
   readonly recoverDelegatedTask: (
@@ -15572,6 +15573,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const acceptedAt = plan.events.at(-1)?.occurredAt ?? (yield* DateTime.now);
     const committed = yield* eventSink
       .commitCommand({
+        ...(command.type === "thread.create" &&
+        (command.folderId !== undefined || command.inheritFolderFromThreadId !== undefined)
+          ? {
+              folder: {
+                ...(command.folderId === undefined ? {} : { folderId: command.folderId }),
+                ...(command.inheritFolderFromThreadId === undefined
+                  ? {}
+                  : { parentThreadId: command.inheritFolderFromThreadId }),
+                ...(command.allowMissingFolder === true ? { allowMissing: true } : {}),
+              },
+            }
+          : command.type === "delegated_task.request" && command.folderId !== undefined
+            ? { folder: { folderId: command.folderId } }
+            : {}),
         commandId: command.commandId,
         threadId: commandThreadId(command),
         commandType: command.type,
@@ -16194,6 +16209,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     new OrchestratorProjectionError({ threadId: ThreadId.make("thread:shell"), cause });
 
   return OrchestratorV2.of({
+    threadFolders: eventSink.threadFolders,
     resumeQueuedRuns,
     recoverDelegatedTasks,
     recoverDelegatedTask,

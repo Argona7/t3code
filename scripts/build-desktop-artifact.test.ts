@@ -540,7 +540,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.deepStrictEqual(release.publish, [
         {
           provider: "github",
-          owner: "pingdotgg",
+          owner: "Argona7",
           repo: "t3code",
           releaseType: "release",
         },
@@ -548,10 +548,34 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }).pipe(
       Effect.provide(
         ConfigProvider.layer(
-          ConfigProvider.fromEnv({ env: { GITHUB_REPOSITORY: "pingdotgg/t3code" } }),
+          ConfigProvider.fromEnv({ env: { GITHUB_REPOSITORY: "Argona7/t3code" } }),
         ),
       ),
     ),
+  );
+
+  it.effect("leaves fork builds without a feed when upstream is configured", () =>
+    Effect.gen(function* () {
+      for (const env of [
+        {},
+        { GITHUB_REPOSITORY: "pingdotgg/t3code" },
+        {
+          GITHUB_REPOSITORY: "Argona7/t3code",
+          T3CODE_DESKTOP_UPDATE_REPOSITORY: " PINGDOTGG/T3Code ",
+        },
+      ]) {
+        const config = yield* createBuildConfig(
+          "mac",
+          "dmg",
+          "0.0.33",
+          false,
+          false,
+          undefined,
+          undefined,
+        ).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env }))));
+        assert.isNull(config.publish);
+      }
+    }),
   );
 
   it.effect("names the Electron window class in the Linux desktop entry", () =>
@@ -586,7 +610,12 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }).pipe(
       Effect.provide(
         ConfigProvider.layer(
-          ConfigProvider.fromEnv({ env: { GITHUB_REPOSITORY: "pingdotgg/t3code" } }),
+          ConfigProvider.fromEnv({
+            env: {
+              GITHUB_REPOSITORY: "pingdotgg/t3code",
+              T3CODE_DESKTOP_UPDATE_REPOSITORY: "example/t3code",
+            },
+          }),
         ),
       ),
     ),

@@ -132,7 +132,7 @@ export function makeState(home: string, env: NodeJS.ProcessEnv = {}) {
   };
 }
 
-const readPairingPath = Effect.gen(function* () {
+export const readPairingPath = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   return yield* fs.readFileString(path.join(T3_HOME, "pairing-path"));

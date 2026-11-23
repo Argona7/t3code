@@ -14,6 +14,7 @@ import {
   type ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as ThreadFolders from "../threadFolders.ts";
 import * as ProviderCommitBatch from "./ProviderCommitBatch.ts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -80,6 +81,7 @@ const CurrentProviderBatch = Context.Reference<ProviderBatchPublication | undefi
 );
 
 export interface EventSinkV2Shape {
+  readonly threadFolders: Effect.Effect<ThreadFolders.ThreadFolders["Service"]>;
   /** Items that are not provider snapshots, such as a consumer's own control items, never batch. */
   readonly consumeProviderEvents: <A extends { readonly type: string }, E, R, E2, R2>(
     source: Stream.Stream<A, E, R>,
@@ -193,6 +195,7 @@ export interface EventSinkV2Shape {
     EventSinkV2Error
   >;
   readonly commitCommand: (input: {
+    readonly folder?: ThreadFolders.FolderChoice;
     readonly commandId: CommandId;
     readonly threadId: ThreadId;
     readonly commandType: string;
@@ -271,6 +274,7 @@ const layerBase: Layer.Layer<
   EventSinkV2,
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
+    const folders = yield* ThreadFolders.ThreadFolders;
     const commandReceipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
     const effectOutbox = yield* EffectOutbox.EffectOutboxV2;
     const eventStore = yield* EventStore.EventStoreV2;
@@ -411,10 +415,25 @@ const layerBase: Layer.Layer<
 
     const applyStoredEvents =
       /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
-      Effect.fnUntraced(function* (storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>) {
-        yield* Effect.forEach(storedEvents, (stored) => projectionStore.apply(stored.event), {
-          concurrency: 1,
-        });
+      Effect.fnUntraced(function* (
+        storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>,
+        initialFolder?: string | null,
+      ) {
+        for (const { event } of storedEvents) {
+          yield* projectionStore.apply(event);
+          if (event.type === "thread.deleted") {
+            yield* folders.assign(event.threadId, null);
+          } else if (event.type === "thread.created") {
+            const parentThreadId = event.payload.lineage.parentThreadId;
+            const folderId =
+              initialFolder !== undefined
+                ? initialFolder
+                : parentThreadId === null
+                  ? null
+                  : yield* folders.resolve({ parentThreadId });
+            if (folderId !== null) yield* folders.assign(event.threadId, folderId);
+          }
+        }
         const sequence = storedEvents.at(-1)?.sequence;
         if (sequence !== undefined) {
           const now = DateTime.formatIso(yield* DateTime.now);
@@ -779,6 +798,31 @@ const layerBase: Layer.Layer<
             return { ...existing, committed: false as const, cancelledEffectIds: [] };
           }
 
+          let initialFolder: string | null | undefined;
+          if (input.folder !== undefined) {
+            const resolved = yield* folders.resolve(input.folder).pipe(Effect.result);
+            if (resolved._tag === "Failure") {
+              if (resolved.failure.code !== "not-found") return yield* resolved.failure;
+              const receipt: CommandReceiptStore.CommandReceiptV2 = {
+                commandId: input.commandId,
+                threadId: input.threadId,
+                commandType: input.commandType,
+                acceptedAt: input.acceptedAt,
+                resultSequence: yield* eventStore.latestSequence({ threadId: input.threadId }),
+                status: "rejected",
+                error: resolved.failure.message,
+              };
+              yield* commandReceipts.upsert(receipt);
+              return {
+                receipt,
+                storedEvents: [],
+                committed: false as const,
+                cancelledEffectIds: [],
+              };
+            }
+            initialFolder = resolved.success;
+          }
+
           // Planning does not lock the source. Once deletion commits, maintenance
           // can remove its checkpoints, so a new fork must not revive that history.
           if (input.commandType === "thread.fork") {
@@ -832,7 +876,7 @@ const layerBase: Layer.Layer<
               new Error(`Command ${input.commandId} produced no orchestration events.`),
             );
           }
-          const outcomes = yield* applyStoredEvents(storedEvents);
+          const outcomes = yield* applyStoredEvents(storedEvents, initialFolder);
           yield* effectOutbox.enqueue(input.effects);
           const receipt: CommandReceiptStore.CommandReceiptV2 = {
             commandId: input.commandId,
@@ -1124,6 +1168,7 @@ const layerBase: Layer.Layer<
     );
 
     return EventSinkV2.of({
+      threadFolders: Effect.succeed(folders),
       consumeProviderEvents: coordinator.consume,
       withProviderBatch,
       write: (input) =>
@@ -1258,7 +1303,7 @@ const layerBase: Layer.Layer<
         ),
     } satisfies EventSinkV2Shape);
   }),
-);
+).pipe(Layer.provide(ThreadFolders.layer));
 
 /** Share the worker's outbox instance: enqueue wakeups are in-memory. */
 export const layerFromStores = layerBase;

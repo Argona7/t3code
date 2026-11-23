@@ -133,7 +133,13 @@ import {
   runtimeModeRank,
   taskPrompt,
 } from "./delegatedTaskModes.ts";
-import { assertTargetWithinLimits, isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
+import {
+  assertTargetWithinLimits,
+  assertThreadFolders,
+  isLiveCallerShell,
+  threadFolderRejection,
+  threadNotFound,
+} from "./threadAccess.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
@@ -2682,6 +2688,9 @@ const make = Effect.gen(function* () {
         requestKey: key,
         operation: "delegate-task",
       });
+      if (input.folderId != null) {
+        yield* assertThreadFolders(threadManagement, [{ folderId: input.folderId, commandId }]);
+      }
       const isRetryOfAcceptedDelegation = yield* threadManagement.hasReceipt(commandId);
       const target = yield* resolveTargetRechecking({
         parent,
@@ -2740,6 +2749,7 @@ const make = Effect.gen(function* () {
           parentThreadId: scope.thread.threadId,
           parentRunId: parentRun.id,
           parentNodeId: parentRun.rootNodeId,
+          ...(input.folderId === undefined ? {} : { folderId: input.folderId }),
           task: taskPrompt(input),
           ...(input.title === undefined ? {} : { title: input.title }),
           modelSelection: target.modelSelection,
@@ -2755,10 +2765,11 @@ const make = Effect.gen(function* () {
           Effect.mapError((error) =>
             error._tag === "ThreadManagementProviderInstanceDisabledError"
               ? threadManagementFailure(error)
-              : failure(
+              : (threadFolderRejection(error, input.folderId) ??
+                failure(
                   "orchestration_error",
                   `Unable to create delegated task: ${userFacingDispatchErrorMessage(error) ?? errorMessage(error)}`,
-                ),
+                )),
           ),
         );
       const taskEvent = result.storedEvents.find(
@@ -3029,16 +3040,19 @@ const make = Effect.gen(function* () {
         const parentNodeId = parentRun.rootNodeId;
         const providers = yield* loadProviders;
         const key = yield* requestKey(input.clientRequestId);
+        const creationCommandId = (index: number) =>
+          stableCommandId({ scope, requestKey: key, operation: "create-thread", index });
+        yield* assertThreadFolders(
+          threadManagement,
+          input.threads.flatMap(({ folderId }, index) =>
+            folderId == null ? [] : [{ folderId, commandId: creationCommandId(index) }],
+          ),
+        );
         const created = yield* Effect.forEach(
           input.threads,
           (request, index) =>
             Effect.gen(function* () {
-              const commandId = stableCommandId({
-                scope,
-                requestKey: key,
-                operation: "create-thread",
-                index,
-              });
+              const commandId = creationCommandId(index);
               const threadId = stableThreadId({
                 scope,
                 requestKey: key,
@@ -3099,6 +3113,8 @@ const make = Effect.gen(function* () {
                   commandId,
                   threadId,
                   projectId: parent.thread.projectId,
+                  inheritFolderFromThreadId: scope.thread.threadId,
+                  ...(request.folderId === undefined ? {} : { folderId: request.folderId }),
                   title,
                   modelSelection: target.modelSelection,
                   runtimeMode,
@@ -3111,11 +3127,13 @@ const make = Effect.gen(function* () {
                   ...(initialMessage === undefined ? {} : { initialMessage }),
                 })
                 .pipe(
-                  Effect.mapError((error) =>
-                    failure(
-                      "orchestration_error",
-                      `Unable to create thread ${index + 1}: ${userFacingDispatchErrorMessage(error) ?? errorMessage(error)}`,
-                    ),
+                  Effect.mapError(
+                    (error) =>
+                      threadFolderRejection(error, request.folderId) ??
+                      failure(
+                        "orchestration_error",
+                        `Unable to create thread ${index + 1}: ${userFacingDispatchErrorMessage(error) ?? errorMessage(error)}`,
+                      ),
                   ),
                 );
               // A receipt can appear after target resolution; use the committed thread's selection.

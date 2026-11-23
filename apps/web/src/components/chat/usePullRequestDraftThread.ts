@@ -1,6 +1,7 @@
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import type { UnifiedSettings } from "@t3tools/contracts";
 import { useStableCallback } from "../../hooks/useStableCallback";
+import { getSelectedThreadFolderId, resolveThreadFolderId } from "../../hooks/useThreadFolders";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { useNavigate } from "@tanstack/react-router";
@@ -14,6 +15,7 @@ import { buildDraftThreadRouteParams } from "../../threadRoutes";
 import {
   type DraftCheckoutPullRequest,
   type DraftThreadEnvMode,
+  type DraftSessionState,
   useComposerDraftStore,
   DraftId,
 } from "../../composerDraftStore";
@@ -73,12 +75,16 @@ export function usePullRequestDraftThread(input: PullRequestDraftThreadInput) {
       throw new Error("No active project is available for this pull request.");
     }
     const activeProjectRef = scopeProjectRef(activeProject.environmentId, activeProject.id);
+    const folderId = getSelectedThreadFolderId(activeProjectRef.environmentId);
+    const matchesFolder = (draft: DraftSessionState) =>
+      resolveThreadFolderId(draft.environmentId, draft.folderId) === folderId &&
+      (folderId === null || draft.environmentId === activeProjectRef.environmentId);
     const logicalProjectKey = deriveLogicalProjectKeyFromSettings(
       activeProject,
       projectGroupingSettings,
     );
     const storedDraftSession = getDraftSessionByLogicalProjectKey(logicalProjectKey);
-    if (storedDraftSession) {
+    if (storedDraftSession && matchesFolder(storedDraftSession)) {
       setDraftThreadContext(storedDraftSession.draftId, input);
       setLogicalProjectDraftThreadId(
         logicalProjectKey,
@@ -99,7 +105,12 @@ export function usePullRequestDraftThread(input: PullRequestDraftThreadInput) {
     }
 
     const activeDraftSession = routeKind === "draft" && draftId ? getDraftSession(draftId) : null;
-    if (!isServerThread && activeDraftSession?.logicalProjectKey === logicalProjectKey && draftId) {
+    if (
+      !isServerThread &&
+      activeDraftSession?.logicalProjectKey === logicalProjectKey &&
+      matchesFolder(activeDraftSession) &&
+      draftId
+    ) {
       setDraftThreadContext(draftId, input);
       setLogicalProjectDraftThreadId(logicalProjectKey, activeProjectRef, draftId, {
         threadId: activeDraftSession.threadId,
@@ -115,6 +126,7 @@ export function usePullRequestDraftThread(input: PullRequestDraftThreadInput) {
     const nextThreadId = newThreadId();
     setLogicalProjectDraftThreadId(logicalProjectKey, activeProjectRef, nextDraftId, {
       threadId: nextThreadId,
+      folderId,
       createdAt: new Date().toISOString(),
       runtimeMode: resolveProjectSettings(settings, activeProject.id, activeProject).settings
         .defaultRuntimeMode,

@@ -1,9 +1,9 @@
 import { discardComposerDraft } from "../../lib/discardComposerDraft";
-import type { ContextMenuSource } from "@t3tools/contracts";
+import type { ContextMenuSource, EnvironmentId, ThreadFolder } from "@t3tools/contracts";
 import { contextMenuSourceOf } from "../../contextMenuSource";
 import { assistantCitationsToPlainText } from "@t3tools/shared/assistantCitations";
 import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
-import { SquarePenIcon, XIcon } from "lucide-react";
+import { FolderInputIcon, SquarePenIcon, XIcon } from "lucide-react";
 import {
   memo,
   useState,
@@ -15,6 +15,7 @@ import { useShallow } from "zustand/react/shallow";
 import { cn } from "~/lib/utils";
 import { resolveSidebarRowAccessibility } from "../Sidebar.logic";
 import { ProjectFavicon, type ProjectFaviconProject } from "../ProjectFavicon";
+import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   composerDraftHasUserContent,
@@ -31,6 +32,7 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
   project: ProjectFaviconProject | null;
   projectDisplayName: string | null;
   isActive: boolean;
+  canMoveToFolder: boolean;
   onNavigate: (draftId: DraftId) => void;
   onDiscard: (draftId: DraftId) => void;
   onContextMenu: (
@@ -88,6 +90,11 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
     event.stopPropagation();
     onDiscard(draftId);
   };
+  const handleFolderActions = (event: ReactMouseEvent) => {
+    event.stopPropagation();
+    const rect = event.currentTarget.getBoundingClientRect();
+    onContextMenu(draftId, { x: rect.left, y: rect.bottom }, contextMenuSourceOf(event));
+  };
   return (
     <li className="list-none py-0.5">
       <div
@@ -115,6 +122,25 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
               {props.projectDisplayName}
             </span>
             <span className="ml-auto flex h-5 min-w-5 shrink-0 items-center justify-end">
+              {props.canMoveToFolder ? (
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <Button
+                        type="button"
+                        size="icon-xs"
+                        variant="ghost-muted"
+                        aria-label="Draft actions"
+                        aria-haspopup="menu"
+                        onClick={handleFolderActions}
+                      />
+                    }
+                  >
+                    <FolderInputIcon aria-hidden />
+                  </TooltipTrigger>
+                  <TooltipPopup side="top">Draft actions</TooltipPopup>
+                </Tooltip>
+              ) : null}
               <Tooltip>
                 <TooltipTrigger
                   render={
@@ -150,6 +176,9 @@ export const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
   projectDisplayNameByKey: ReadonlyMap<string, string>;
   scopedProjectKeys: ReadonlySet<string> | null;
   routeDraftId: string | null;
+  folderScope?: string | null | undefined;
+  folderScopeEnvironmentId?: EnvironmentId | undefined;
+  folders?: readonly ThreadFolder[] | undefined;
   onNavigateToDraft: (draftId: DraftId) => void;
   onDraftContextMenu: (
     draftId: DraftId,
@@ -185,6 +214,7 @@ export const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
     setFrozenActive({ routeDraftId: props.routeDraftId, row });
   }
   const drafts = (() => {
+    const folderIds = props.folders ? new Set(props.folders.map(({ id }) => id)) : null;
     const rows: SidebarDraftRowData[] = [];
     for (const [draftKey, session] of Object.entries(draftThreadsByThreadKey)) {
       if (session.promotedTo != null) {
@@ -196,9 +226,18 @@ export const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
       ) {
         continue;
       }
+      if (props.folderScope !== undefined) {
+        const effectiveFolderId =
+          session.environmentId === props.folderScopeEnvironmentId &&
+          session.folderId !== null &&
+          (folderIds === null || folderIds.has(session.folderId))
+            ? session.folderId
+            : null;
+        if (effectiveFolderId !== props.folderScope) continue;
+      }
       if (draftKey === props.routeDraftId) {
         if (frozenActive.routeDraftId === draftKey && frozenActive.row !== null) {
-          rows.push(frozenActive.row);
+          rows.push({ ...frozenActive.row, session });
         }
         continue;
       }
@@ -226,6 +265,10 @@ export const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
             project={props.projectByKey.get(projectKey) ?? null}
             projectDisplayName={props.projectDisplayNameByKey.get(projectKey) ?? null}
             isActive={draftId === props.routeDraftId}
+            canMoveToFolder={
+              session.environmentId === props.folderScopeEnvironmentId &&
+              Boolean(props.folders?.length)
+            }
             onNavigate={props.onNavigateToDraft}
             onDiscard={discardComposerDraft}
             onContextMenu={props.onDraftContextMenu}

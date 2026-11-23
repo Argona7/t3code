@@ -52,6 +52,7 @@ import { useThreadRouteTarget } from "./useThreadRouteTarget";
 import { readUnloadedThreadCount } from "../state/olderSettledShelf";
 import { resolveProjectDefaultProviderModelSelection } from "../providerInstances";
 import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
+import { getSelectedThreadFolderId, resolveThreadFolderId } from "./useThreadFolders";
 
 export const LAST_USED_PROJECT_STORAGE_KEY = "t3code:last-used-project:v1";
 export const lastUsedProjectKeySchema = Schema.NullOr(Schema.String);
@@ -105,6 +106,10 @@ export function createNewThreadHandler(router: AnyRouter) {
     },
   ): Promise<{ draftId: DraftId; threadId: ThreadId } | null> => {
     const projects = readProjects();
+    const folderId = getSelectedThreadFolderId(projectRef.environmentId);
+    const matchesFolder = (draft: DraftThreadState) =>
+      resolveThreadFolderId(draft.environmentId, draft.folderId ?? null) === folderId &&
+      (folderId === null || draft.environmentId === projectRef.environmentId);
     const projectGroupingSettings = selectProjectGroupingSettings(getClientSettings());
     // Read at call time; status pushes replace the config map and would recreate every sidebar handler.
     const environmentServerConfigs = appAtomRegistry.get(environmentServerConfigsAtom);
@@ -253,6 +258,7 @@ export function createNewThreadHandler(router: AnyRouter) {
     }
     const emptyStoredDraftThread =
       reusableStoredDraftThread &&
+      matchesFolder(reusableStoredDraftThread) &&
       !composerDraftHasUserContent(getComposerDraft(reusableStoredDraftThread.draftId))
         ? reusableStoredDraftThread
         : null;
@@ -283,9 +289,10 @@ export function createNewThreadHandler(router: AnyRouter) {
             routeTargetNow.draftId === emptyStoredDraftThread.draftId;
           const promotedMeanwhile =
             storedDraftThreadRef !== null && readThreadShell(storedDraftThreadRef) !== null;
+          const currentStoredDraft = getDraftSessionByLogicalProjectKey(logicalProjectKey);
           const remappedMeanwhile =
-            getDraftSessionByLogicalProjectKey(logicalProjectKey)?.draftId !==
-            emptyStoredDraftThread.draftId;
+            currentStoredDraft?.draftId !== emptyStoredDraftThread.draftId ||
+            !matchesFolder(currentStoredDraft);
           const investedMeanwhile = composerDraftHasUserContent(
             getComposerDraft(emptyStoredDraftThread.draftId),
           );
@@ -360,6 +367,7 @@ export function createNewThreadHandler(router: AnyRouter) {
       currentRouteTarget?.kind === "draft" &&
       latestActiveDraftThread.logicalProjectKey === logicalProjectKey &&
       latestActiveDraftThread.promotedTo == null &&
+      matchesFolder(latestActiveDraftThread) &&
       !composerDraftHasUserContent(getComposerDraft(currentRouteTarget.draftId))
     ) {
       if (
@@ -397,6 +405,7 @@ export function createNewThreadHandler(router: AnyRouter) {
       if (
         racedDraft &&
         racedDraft.draftId !== storedDraftThread?.draftId &&
+        matchesFolder(racedDraft) &&
         readThreadShell(scopeThreadRef(racedDraft.environmentId, racedDraft.threadId)) === null
       ) {
         setLogicalProjectDraftThreadId(logicalProjectKey, projectRef, racedDraft.draftId, {
@@ -416,6 +425,7 @@ export function createNewThreadHandler(router: AnyRouter) {
       }
       setLogicalProjectDraftThreadId(logicalProjectKey, projectRef, draftId, {
         threadId,
+        folderId,
         createdAt,
         branch: options?.branch ?? null,
         worktreePath: options?.worktreePath ?? null,

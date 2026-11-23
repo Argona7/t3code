@@ -46,6 +46,20 @@ describe("RPC authorization scopes", () => {
     }
   });
 
+  it("requires read access for snapshots and operate access for folder changes", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.threadFoldersSubscribe)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    for (const method of [
+      WS_METHODS.threadFoldersCreate,
+      WS_METHODS.threadFoldersRename,
+      WS_METHODS.threadFoldersDelete,
+      WS_METHODS.threadFoldersMove,
+    ]) {
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationOperateScope);
+    }
+  });
+
   it("keeps triage, which seeds an agent that reads logs and the database, behind operate scope", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.serverPrepareTriage)).toBe(
       AuthOrchestrationOperateScope,

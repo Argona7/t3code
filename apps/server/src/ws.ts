@@ -286,6 +286,9 @@ import { requestUrl } from "./requestUrl.ts";
 
 const CONFIG_DISCOVERY_TIMEOUT = Duration.seconds(5);
 const isProviderUploadFeedbackError = Schema.is(ProviderUploadFeedbackError);
+const isOrchestratorCommandPreviouslyRejected = Schema.is(
+  Orchestrator.OrchestratorCommandPreviouslyRejectedError,
+);
 
 const resolveDiscoveryForConfig = <A, E, R>(
   discovery: Effect.Effect<A, E, R>,
@@ -2165,6 +2168,10 @@ export const layerWsRpc = (
                     .pipe(
                       Effect.andThen(
                         ThreadMessageIntake.launchThread({
+                          ...(input.folderId === undefined ? {} : { folderId: input.folderId }),
+                          ...(input.allowMissingFolder === true
+                            ? { allowMissingFolder: true }
+                            : {}),
                           commandId: input.commandId,
                           ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
                           ...(input.reuseExistingThread === undefined
@@ -2235,7 +2242,9 @@ export const layerWsRpc = (
                       new OrchestrationV2ThreadLaunchError({
                         commandId: input.commandId,
                         projectId: input.projectId,
-                        message: "Failed to launch thread",
+                        message: isOrchestratorCommandPreviouslyRejected(cause.cause)
+                          ? cause.cause.detail
+                          : "Failed to launch thread",
                         cause,
                       }),
                     ServerRuntimeStartupError: (cause) =>
@@ -2293,6 +2302,18 @@ export const layerWsRpc = (
           ),
         [ORCHESTRATION_V2_WS_METHODS.subscribePromptSuggestion]: (input) =>
           providerSessionManager.subscribePromptSuggestion(input.threadId),
+        [WS_METHODS.threadFoldersSubscribe]: () =>
+          Stream.unwrap(
+            Effect.map(threadManagement.threadFolders, (folders) => folders.subscribe()),
+          ),
+        [WS_METHODS.threadFoldersCreate]: (input) =>
+          Effect.flatMap(threadManagement.threadFolders, (folders) => folders.create(input)),
+        [WS_METHODS.threadFoldersRename]: (input) =>
+          Effect.flatMap(threadManagement.threadFolders, (folders) => folders.rename(input)),
+        [WS_METHODS.threadFoldersDelete]: (input) =>
+          Effect.flatMap(threadManagement.threadFolders, (folders) => folders.remove(input)),
+        [WS_METHODS.threadFoldersMove]: (input) =>
+          Effect.flatMap(threadManagement.threadFolders, (folders) => folders.move(input)),
         [WS_METHODS.scheduledTasksSubscribe]: (_input) =>
           scheduledTasks.subscribeList().pipe(Stream.map(withVisibleWebhookUrls)),
         [WS_METHODS.scheduledTasksUpsert]: (input) => scheduledTasks.upsert(input),

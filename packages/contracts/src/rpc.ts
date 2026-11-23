@@ -37,6 +37,7 @@ import * as Schema from "effect/Schema";
 import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
 import * as RpcMiddleware from "effect/rpc/RpcMiddleware";
+import * as ThreadFolders from "./threadFolders.ts";
 import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { SecretSourceCheckResult } from "./settingsSecretValue.ts";
 import { SecretReference } from "./secretReference.ts";
@@ -552,6 +553,11 @@ export const WS_METHODS = {
   serverGetUsageSummary: "server.getUsageSummary",
   serverRefreshUsageRates: "server.refreshUsageRates",
 
+  threadFoldersSubscribe: "threadFolders.subscribe",
+  threadFoldersCreate: "threadFolders.create",
+  threadFoldersRename: "threadFolders.rename",
+  threadFoldersDelete: "threadFolders.delete",
+  threadFoldersMove: "threadFolders.move",
   scheduledTasksSubscribe: "scheduledTasks.subscribe",
   scheduledTasksUpsert: "scheduledTasks.upsert",
   scheduledTasksSetEnabled: "scheduledTasks.setEnabled",
@@ -2022,6 +2028,37 @@ const WsSubscribeServerLifecycleRpc = Rpc.make(WS_METHODS.subscribeServerLifecyc
   stream: true,
 });
 
+const WsThreadFoldersSubscribeRpc = Rpc.make(WS_METHODS.threadFoldersSubscribe, {
+  payload: Schema.Struct({}),
+  success: ThreadFolders.ThreadFolderSnapshot,
+  error: Schema.Union([ThreadFolders.ThreadFolderError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
+const WsThreadFoldersCreateRpc = Rpc.make(WS_METHODS.threadFoldersCreate, {
+  payload: ThreadFolders.ThreadFolderCreate,
+  success: ThreadFolders.ThreadFolder,
+  error: Schema.Union([ThreadFolders.ThreadFolderError, EnvironmentAuthorizationError]),
+});
+
+const WsThreadFoldersRenameRpc = Rpc.make(WS_METHODS.threadFoldersRename, {
+  payload: ThreadFolders.ThreadFolderRename,
+  success: Schema.Void,
+  error: Schema.Union([ThreadFolders.ThreadFolderError, EnvironmentAuthorizationError]),
+});
+
+const WsThreadFoldersDeleteRpc = Rpc.make(WS_METHODS.threadFoldersDelete, {
+  payload: ThreadFolders.ThreadFolderDelete,
+  success: Schema.Void,
+  error: Schema.Union([ThreadFolders.ThreadFolderError, EnvironmentAuthorizationError]),
+});
+
+const WsThreadFoldersMoveRpc = Rpc.make(WS_METHODS.threadFoldersMove, {
+  payload: ThreadFolders.ThreadFolderMove,
+  success: Schema.Void,
+  error: Schema.Union([ThreadFolders.ThreadFolderError, EnvironmentAuthorizationError]),
+});
+
 const WsScheduledTasksSubscribeRpc = Rpc.make(WS_METHODS.scheduledTasksSubscribe, {
   payload: ScheduledTaskListInput,
   success: ScheduledTaskListResult,
@@ -2172,6 +2209,11 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetUsageSummaryRpc,
   WsServerRefreshUsageRatesRpc,
   WsServerSignalProcessRpc,
+  WsThreadFoldersSubscribeRpc,
+  WsThreadFoldersCreateRpc,
+  WsThreadFoldersRenameRpc,
+  WsThreadFoldersDeleteRpc,
+  WsThreadFoldersMoveRpc,
   WsScheduledTasksSubscribeRpc,
   WsScheduledTasksUpsertRpc,
   WsScheduledTasksSetEnabledRpc,

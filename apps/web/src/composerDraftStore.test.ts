@@ -1135,8 +1135,10 @@ describe("composerDraftStore project draft thread mapping", () => {
 
   it("restores a failed draft without changing the fresh draft", () => {
     const store = useComposerDraftStore.getState();
-    store.setProjectDraftThreadId(projectRef, draftId, { threadId });
+    store.setProjectDraftThreadId(projectRef, draftId, { threadId, folderId: "inbox" });
+    store.setDraftThreadFolder(draftId, "follow-up");
     const sentDraft = useComposerDraftStore.getState().getDraftSession(draftId)!;
+    expect(sentDraft.folderId).toBe("follow-up");
     markPromotedDraftThreadByRef(scopeThreadRef(TEST_ENVIRONMENT_ID, threadId));
     const freshId = DraftId.make("fresh-background-draft");
     store.setProjectDraftThreadId(projectRef, freshId, { threadId: ThreadId.make("fresh-thread") });
@@ -1149,6 +1151,8 @@ describe("composerDraftStore project draft thread mapping", () => {
       "retry-thread",
     );
     expect(useComposerDraftStore.getState().getDraftSession(draftId)?.branch).toBe("retry-base");
+    expect(useComposerDraftStore.getState().getDraftSession(draftId)?.folderId).toBe("follow-up");
+    expect(useComposerDraftStore.getState().getDraftSession(freshId)?.folderId).toBeNull();
     expect(draftByKey(freshId)?.prompt).toBe("new work");
     expect(draftByKey(draftId)?.prompt).toBe("retry work");
   });
@@ -1209,6 +1213,7 @@ describe("composerDraftStore project draft thread mapping", () => {
     const store = useComposerDraftStore.getState();
     store.setProjectDraftThreadId(projectRef, draftId, {
       threadId,
+      folderId: "local-only",
       branch: "feature/local-only",
       worktreePath: "/tmp/local-worktree",
       envMode: "worktree",
@@ -1222,6 +1227,7 @@ describe("composerDraftStore project draft thread mapping", () => {
     expect(useComposerDraftStore.getState().getDraftThread(draftId)).toMatchObject({
       environmentId: OTHER_TEST_ENVIRONMENT_ID,
       projectId,
+      folderId: null,
       branch: null,
       worktreePath: null,
       envMode: "worktree",
@@ -2299,7 +2305,7 @@ describe("composerDraftStore model seed migration", () => {
           draftThreadsByThreadKey: {
             [staleDraftId]: draftThread(staleThreadId),
             [explicitDraftId]: draftThread(explicitThreadId),
-            [typedDraftId]: draftThread(typedThreadId),
+            [typedDraftId]: { ...draftThread(typedThreadId), folderId: "draft-folder" },
           },
           logicalProjectDraftThreadKeyByLogicalProjectKey: {
             [logicalProjectKey]: staleDraftId,
@@ -2322,6 +2328,10 @@ describe("composerDraftStore model seed migration", () => {
         modelSelectionByProvider: { [CODEX_INSTANCE]: staleSelection },
         activeProvider: CODEX_INSTANCE,
       });
+      expect(useComposerDraftStore.getState().getDraftSession(typedDraftId)?.folderId).toBe(
+        "draft-folder",
+      );
+      expect(useComposerDraftStore.getState().getDraftSession(staleDraftId)?.folderId).toBeNull();
       expect(draftByKey(explicitDraftId)).toMatchObject({
         modelSelectionByProvider: { [CODEX_INSTANCE]: staleSelection },
         activeProvider: CODEX_INSTANCE,

@@ -30,6 +30,7 @@ import { usePromptStashStore } from "~/promptStashStore";
 import { useRightPanelStore } from "~/rightPanelStore";
 import { getRouter } from "~/router";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
+import { primaryServerConfigAtom } from "~/state/server";
 import { environmentThreadDetails } from "~/state/threads";
 import {
   ENVIRONMENT_ID,
@@ -584,14 +585,13 @@ it("a mounted thread view lets go of the thread structures it has replaced", asy
 it("a shortcut conditioned on rightPanelOpen sees the thread's open right panel", async () => {
   await page.viewport(1280, 800);
   const thread = threadWithHistory("thread-panel-shortcut", 1);
-  using _environment = installFakeEnvironment([thread], {
-    keybindings: mergeWithDefaultKeybindings(
-      compileResolvedKeybindingsConfig([
-        { key: "ctrl+t", command: "rightPanel.new", when: "rightPanelOpen && !terminalFocus" },
-        { key: "ctrl+t", command: "rightPanel.toggle", when: "!rightPanelOpen" },
-      ]),
-    ),
-  });
+  const keybindings = mergeWithDefaultKeybindings(
+    compileResolvedKeybindingsConfig([
+      { key: "ctrl+t", command: "rightPanel.new", when: "rightPanelOpen && !terminalFocus" },
+      { key: "ctrl+t", command: "rightPanel.toggle", when: "!rightPanelOpen" },
+    ]),
+  );
+  using _environment = installFakeEnvironment([thread], { keybindings });
   __setClientSettingsForTests({
     ...DEFAULT_CLIENT_SETTINGS,
     onboardingCompletedAt: "2026-01-01T00:00:00.000Z",
@@ -606,8 +606,13 @@ it("a shortcut conditioned on rightPanelOpen sees the thread's open right panel"
   });
   const composer = page.getByTestId("composer-editor");
   const toggle = page.getByRole("button", { name: "Toggle right panel", exact: true });
+  await vi.waitFor(() =>
+    expect(appAtomRegistry.get(primaryServerConfigAtom)?.keybindings).toEqual(keybindings),
+  );
   await expect.element(toggle).toHaveAttribute("aria-pressed", "false");
-  await toggle.click();
+  await composer.click();
+  await userEvent.keyboard("{Control>}t{/Control}");
+  await expect.element(toggle).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("button", { name: /^Files/ }).click();
   await composer.click();
   await userEvent.keyboard("{Control>}t{/Control}");
