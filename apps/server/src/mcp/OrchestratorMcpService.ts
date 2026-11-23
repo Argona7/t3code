@@ -3037,6 +3037,19 @@ const make = Effect.gen(function* () {
             "Thread creation requires an active run owned by this MCP provider session.",
           );
         }
+        if (
+          input.threads.some(
+            ({ target }) =>
+              (target?.environmentId !== undefined &&
+                target.environmentId !== scope.environmentId) ||
+              (target?.projectId !== undefined && target.projectId !== parent.thread.projectId),
+          )
+        ) {
+          return yield* failure(
+            "invalid_request",
+            "create_threads uses the calling thread's project and environment. Use t3_thread_launch for another destination.",
+          );
+        }
         const parentNodeId = parentRun.rootNodeId;
         const providers = yield* loadProviders;
         const key = yield* requestKey(input.clientRequestId);

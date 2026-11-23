@@ -196,27 +196,38 @@ export const writesWithCapability = <P, A, E, R>(handle: (params: P) => Effect.E
     () => writingCaller,
   );
 
+type ThreadWriteCheck = Effect.Effect<
+  Caller,
+  OrchestratorMcpFailure,
+  Effect.Services<typeof writingCaller>
+>;
+
 export const writesThreads = <P, A, E, R>(
   threads: (params: P) => ReadonlyArray<ThreadId | undefined>,
-  handle: (params: P) => Effect.Effect<A, E, R>,
-) =>
-  declare(
+  handle: (params: P, check: ThreadWriteCheck) => Effect.Effect<A, E, R>,
+) => {
+  const authorize = Effect.fn("McpToolAccess.authorizeThreads")(function* (params: P) {
+    const caller = yield* writingCaller;
+    for (const threadId of threads(params)) {
+      if (threadId === undefined || threadId === caller.scope.thread?.threadId) continue;
+      const target = yield* caller.threads
+        .getThreadShell(threadId)
+        .pipe(Effect.mapError(unavailable));
+      if (target !== null && target.deletedAt === null) {
+        yield* assertTargetWithinLimits(caller.limits, target);
+        yield* assertSameLink(caller, target);
+      }
+    }
+    return caller;
+  });
+  return declare(
     (params: P) =>
       Effect.gen(function* () {
-        const caller = yield* writingCaller;
-        for (const threadId of threads(params)) {
-          if (threadId === undefined || threadId === caller.scope.thread?.threadId) continue;
-          const target = yield* caller.threads
-            .getThreadShell(threadId)
-            .pipe(Effect.mapError(unavailable));
-          if (target !== null && target.deletedAt === null) {
-            yield* assertTargetWithinLimits(caller.limits, target);
-            yield* assertSameLink(caller, target);
-          }
-        }
+        const check = authorize(params);
+        const caller = yield* check;
         // Modes can rise after this check; the orchestrator rechecks under lock and records refusal before handlers wrap errors.
         const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
-        return yield* handle(params).pipe(
+        return yield* handle(params, check).pipe(
           Effect.provideService(DispatchModeLimit, { ...caller.limits, refused }),
           Effect.catch((error) =>
             Effect.flatMap(Ref.get(refused), (refusal) =>
@@ -229,6 +240,7 @@ export const writesThreads = <P, A, E, R>(
       }),
     () => writingCaller,
   );
+};
 
 const escalationDenied = (refusal: DispatchModeRefusal) =>
   new OrchestratorMcpFailure({

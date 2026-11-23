@@ -55,6 +55,7 @@ describe("RPC authorization scopes", () => {
       WS_METHODS.threadFoldersRename,
       WS_METHODS.threadFoldersDelete,
       WS_METHODS.threadFoldersMove,
+      WS_METHODS.threadFoldersReorder,
     ]) {
       expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationOperateScope);
     }

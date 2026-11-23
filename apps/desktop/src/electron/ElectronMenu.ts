@@ -84,6 +84,7 @@ function normalizeContextMenuItems(source: readonly ContextMenuItem[]): ContextM
       disabled: sourceItem.disabled === true,
       ...(sourceItem.separatorBefore === true ? { separatorBefore: true } : {}),
       ...(typeof sourceItem.checked === "boolean" ? { checked: sourceItem.checked } : {}),
+      ...(sourceItem.radio === true ? { radio: true } : {}),
     };
 
     if (sourceItem.children) {
@@ -170,7 +171,9 @@ export const make = Effect.gen(function* () {
       const itemOption: Electron.MenuItemConstructorOptions = {
         label: item.label,
         enabled: !item.disabled,
-        ...(typeof item.checked === "boolean" ? { type: "checkbox", checked: item.checked } : {}),
+        ...(typeof item.checked === "boolean"
+          ? { type: item.radio ? "radio" : "checkbox", checked: item.checked }
+          : {}),
       };
       if (item.children && item.children.length > 0) {
         itemOption.submenu = buildTemplate(item.children, complete);

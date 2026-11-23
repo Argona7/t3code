@@ -1519,6 +1519,10 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:thread-folders:move",
       tag: WS_METHODS.threadFoldersMove,
     }),
+    reorderThreadFolder: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:thread-folders:reorder",
+      tag: WS_METHODS.threadFoldersReorder,
+    }),
     scheduledTasksLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:scheduled-tasks:live",
       tag: WS_METHODS.scheduledTasksSubscribe,

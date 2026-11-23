@@ -558,6 +558,7 @@ export const WS_METHODS = {
   threadFoldersRename: "threadFolders.rename",
   threadFoldersDelete: "threadFolders.delete",
   threadFoldersMove: "threadFolders.move",
+  threadFoldersReorder: "threadFolders.reorder",
   scheduledTasksSubscribe: "scheduledTasks.subscribe",
   scheduledTasksUpsert: "scheduledTasks.upsert",
   scheduledTasksSetEnabled: "scheduledTasks.setEnabled",
@@ -2059,6 +2060,12 @@ const WsThreadFoldersMoveRpc = Rpc.make(WS_METHODS.threadFoldersMove, {
   error: Schema.Union([ThreadFolders.ThreadFolderError, EnvironmentAuthorizationError]),
 });
 
+const WsThreadFoldersReorderRpc = Rpc.make(WS_METHODS.threadFoldersReorder, {
+  payload: ThreadFolders.ThreadFolderReorder,
+  success: Schema.Void,
+  error: Schema.Union([ThreadFolders.ThreadFolderError, EnvironmentAuthorizationError]),
+});
+
 const WsScheduledTasksSubscribeRpc = Rpc.make(WS_METHODS.scheduledTasksSubscribe, {
   payload: ScheduledTaskListInput,
   success: ScheduledTaskListResult,
@@ -2214,6 +2221,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsThreadFoldersRenameRpc,
   WsThreadFoldersDeleteRpc,
   WsThreadFoldersMoveRpc,
+  WsThreadFoldersReorderRpc,
   WsScheduledTasksSubscribeRpc,
   WsScheduledTasksUpsertRpc,
   WsScheduledTasksSetEnabledRpc,

@@ -203,6 +203,7 @@ describe("command permissions", () => {
     WS_METHODS.threadFoldersRename,
     WS_METHODS.threadFoldersDelete,
     WS_METHODS.threadFoldersMove,
+    WS_METHODS.threadFoldersReorder,
   ])("uses the target grant for both availability and execution of %s", (method) =>
     Effect.gen(function* () {
       const registry = yield* setup;

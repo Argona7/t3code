@@ -1848,7 +1848,16 @@ code {
 }
 
 .sidebar-thread-folders-scroll {
-  scrollbar-width: thin;
+  scrollbar-width: none;
+}
+
+.sidebar-thread-folders-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.sidebar-thread-folder-tab {
+  -webkit-touch-callout: none;
+  user-select: none;
 }
 
 /* Keep parent scrollbar styles off iframe owners to avoid WebKit resize loops: https://webkit.org/b/324485 */

@@ -102,6 +102,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.threadFoldersRename]: "threadFolders",
   [WS_METHODS.threadFoldersDelete]: "threadFolders",
   [WS_METHODS.threadFoldersMove]: "threadFolders",
+  [WS_METHODS.threadFoldersReorder]: "threadFolders",
   [WS_METHODS.scheduledTasksSubscribe]: "scheduledTasks",
   [WS_METHODS.scheduledTasksUpsert]: "scheduledTasks",
   [WS_METHODS.scheduledTasksSetEnabled]: "scheduledTasks",

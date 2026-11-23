@@ -1,4 +1,5 @@
 import * as NodeURL from "node:url";
+import { NodeHttpServer } from "@effect/platform-node";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
@@ -8,10 +9,12 @@ import {
   isProviderNativeSubagentThread,
   MessageId,
   type ModelSelection,
+  OrchestratorMcpCreateThreadsResult,
   OrchestratorMcpDelegateTaskResult,
   OrchestratorMcpThreadInterruptResult,
   OrchestratorMcpThreadSendResult,
   OrchestratorMcpThreadReadResult,
+  type Project,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -27,15 +30,25 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as Tracer from "effect/Tracer";
 import { McpSchema, McpServer } from "effect/ai";
+import { HttpBody, HttpClient, HttpRouter } from "effect/http";
 
+import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import * as McpOAuth from "../auth/McpOAuth.ts";
+import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
+import * as ServerConfig from "../config.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import { CodexOrchestratorReplayHarness } from "../orchestration-v2/Adapters/CodexAdapterV2.testkit.ts";
 import * as CommandReceiptStore from "../orchestration-v2/CommandReceiptStore.ts";
+import * as EffectWorker from "../orchestration-v2/EffectWorker.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import * as ThreadSearch from "../orchestration-v2/ThreadSearch.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
@@ -45,13 +58,23 @@ import {
   materializeReplayTranscriptWorkspace,
 } from "@t3tools/provider-testing/replayTranscript";
 import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
+import * as DocumentText from "../provider/DocumentText.ts";
+import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
+import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
+import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
+import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as SourceControlRepositoryService from "../sourceControl/SourceControlRepositoryService.ts";
+import * as TerminalManager from "../terminal/Manager.ts";
+import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as PeerLinkRequests from "../peer/PeerLinkRequests.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
@@ -197,7 +220,388 @@ const layerUnusedScheduledTaskStub = Layer.succeed(
   }),
 );
 
+const layerUnusedPeerServices = Layer.mergeAll(
+  Layer.mock(PeerForwarding.PeerForwarding)({}),
+  Layer.mock(PeerLinkRequests.PeerLinkRequests)({}),
+  Layer.mock(PeerLinks.PeerLinks)({}),
+  Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+);
+
+const layerCodexProvider = ProviderRegistryMock.layer([
+  makeProviderSnapshot({
+    instanceId: codexInstanceId,
+    driver: ProviderDriverKind.make("codex"),
+    model: codexModel,
+  }),
+]);
+
+const createReplayThread = Effect.fn("createReplayThread")(function* (
+  threadId: ThreadId,
+  title: string,
+  cwd: string,
+) {
+  const orchestrator = yield* Orchestrator.OrchestratorV2;
+  yield* orchestrator.dispatch({
+    type: "thread.create",
+    createdBy: "user",
+    creationSource: "web",
+    commandId: CommandId.make(`command:${threadId}:create`),
+    threadId,
+    projectId,
+    title,
+    modelSelection: codexSelection,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: cwd,
+  });
+});
+
+const startReplayParent = Orchestrator.OrchestratorV2.use((orchestrator) =>
+  orchestrator.dispatch({
+    type: "message.dispatch",
+    createdBy: "user",
+    creationSource: "web",
+    commandId: CommandId.make("command:mcp-replay-parent:start"),
+    threadId: parentThreadId,
+    messageId: MessageId.make("message:mcp-replay-parent:start"),
+    text: parentPrompt,
+    attachments: [],
+    modelSelection: codexSelection,
+    dispatchMode: { type: "start_immediately" },
+  }),
+);
+
+const awaitReplayParent = Effect.fn("awaitReplayParent")(function* (afterSequence: number) {
+  const orchestrator = yield* Orchestrator.OrchestratorV2;
+  const running = yield* orchestrator
+    .streamStoredEventsFrom({ threadId: parentThreadId, afterSequence })
+    .pipe(
+      Stream.filter(
+        ({ event }) => event.type === "provider-turn.updated" && event.payload.status === "running",
+      ),
+      Stream.runHead,
+    );
+  expect(Option.isSome(running)).toBe(true);
+});
+
+const protocol = "2025-06-18";
+
+const connectHttpMcp = Effect.fn("connectHttpMcp")(function* (authorization: string) {
+  const http = yield* HttpClient.HttpClient;
+  const send = (method: string, params: object, sessionId?: string) =>
+    http.post("/mcp", {
+      headers: {
+        accept: "application/json, text/event-stream",
+        authorization,
+        ...(sessionId === undefined
+          ? {}
+          : { "mcp-session-id": sessionId, "mcp-protocol-version": protocol }),
+      },
+      body: HttpBody.text(
+        JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+        "application/json",
+      ),
+    });
+  const initialized = yield* send("initialize", {
+    protocolVersion: protocol,
+    capabilities: {},
+    clientInfo: { name: "thread-folders-integration", version: "1.0.0" },
+  });
+  expect(initialized.status).toBe(200);
+  const sessionId = initialized.headers["mcp-session-id"];
+  if (sessionId === undefined) throw new Error("MCP initialize did not return a session");
+  const rpc = <A>(method: string, params: object) =>
+    send(method, params, sessionId).pipe(
+      Effect.flatMap((response) => {
+        expect(response.status).toBe(200);
+        return response.json;
+      }),
+      Effect.map((body) => (body as { result: A }).result),
+    );
+  const list = () =>
+    rpc<{ tools: ReadonlyArray<{ name: string }> }>("tools/list", {}).pipe(
+      Effect.map(({ tools }) => tools.map(({ name }) => name)),
+    );
+  const call = (name: string, args: object) =>
+    rpc<{
+      isError?: boolean;
+      structuredContent?: unknown;
+      content: ReadonlyArray<{ text: string }>;
+    }>("tools/call", { name, arguments: args });
+  const success = (name: string, args: object) =>
+    call(name, args).pipe(
+      Effect.map((result) => {
+        expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
+        return result.structuredContent;
+      }),
+    );
+  const failure = (name: string, args: object) =>
+    call(name, args).pipe(
+      Effect.map((result) => {
+        expect(result.isError).toBe(true);
+        return JSON.parse(result.content[0]!.text) as { code: string };
+      }),
+    );
+  return { list, success, failure };
+});
+
 describe("orchestrator MCP toolkit", () => {
+  it.live("manages folders and assigns new agent threads through authenticated MCP", () =>
+    Effect.gen(function* () {
+      const cwd = yield* checkpointWorkspace("thread-folders-mcp");
+      const rawTranscript = yield* readDelegatedTaskStatusTranscript(queuedFollowupResult);
+      const transcript = yield* CodexOrchestratorReplayHarness.decodeTranscript(
+        materializeReplayTranscriptWorkspace(rawTranscript, cwd),
+      );
+      const database = SqlitePersistence.layerMemory;
+      const adapters = CodexOrchestratorReplayHarness.makeProviderAdapterRegistryLayer(transcript);
+      const layerReplay = ProviderReplayHarness.layerWithRegistry(
+        { name: "thread-folders-mcp/codex", runtimePolicyOverride: { cwd } },
+        adapters,
+        { databaseLayer: database, runEffectWorker: false },
+      );
+      const settings = ServerSettings.layerTest();
+      const layerThreads = ThreadManagementService.layer.pipe(
+        Layer.provideMerge(layerReplay),
+        Layer.provide(CommandReceiptStore.layer.pipe(Layer.provide(database))),
+        Layer.provide(settings),
+      );
+      const layerAuth = Layer.mergeAll(EnvironmentAuth.layer, McpSessionRegistry.layer).pipe(
+        Layer.provideMerge(ServerEnvironment.layerIdentity),
+        Layer.provideMerge(
+          Layer.mock(ServerEnvironment.ServerEnvironment)({
+            getEnvironmentId: Effect.succeed(EnvironmentId.make("environment:mcp-folders")),
+          }),
+        ),
+        Layer.provide(layerMemorySecretStore),
+        Layer.provide(ManagedPolicy.layerTest()),
+        Layer.provide(database),
+        Layer.provideMerge(ServerConfig.layerTest(cwd, { prefix: "t3-mcp-folders-auth-" })),
+        Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+      );
+      const project: Project = {
+        id: projectId,
+        title: "Folder MCP project",
+        workspaceRoot: cwd,
+        repositoryIdentity: null,
+        faviconPath: null,
+        defaultModelSelection: codexSelection,
+        defaultThreadEnvMode: null,
+        scripts: [],
+        pinnedAt: null,
+        archivedAt: null,
+        createdAt: "2026-06-20T00:00:00.000Z",
+        updatedAt: "2026-06-20T00:00:00.000Z",
+        deletedAt: null,
+      };
+      const launchDependencies = Layer.mergeAll(
+        Layer.mock(ProjectService.ProjectService)({
+          getById: (id) => (id === projectId ? Effect.succeedSome(project) : Effect.succeedNone),
+        }),
+        Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+          namedProjectsRoot: cwd,
+          folderForThread: () => Effect.succeedNone,
+        }),
+        Layer.mock(GitWorkflow.GitWorkflowService)({ currentBranch: () => Effect.succeed(null) }),
+        Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({ get: () => Effect.succeed(null) }),
+        Layer.mock(CheckpointStore.CheckpointStore)({}),
+        Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({
+          runForThread: () => Effect.succeed({ status: "no-script" }),
+        }),
+        Layer.mock(TerminalManager.TerminalManager)({}),
+        Layer.mock(TextGeneration.TextGeneration)({}),
+        WorktreeSetupTracker.layer,
+        IdAllocator.layer,
+        layerCodexProvider,
+        settings,
+      );
+      const registrations = Layer.mergeAll(
+        McpHttpServer.layerOrchestratorToolkit,
+        McpHttpServer.layerThreadToolkit,
+        McpHttpServer.layerProjectRegistration,
+      ).pipe(
+        Layer.provide(
+          ThreadLaunchService.layer.pipe(
+            Layer.provide(launchDependencies),
+            Layer.provide(CommandReceiptStore.layer.pipe(Layer.provide(database))),
+          ),
+        ),
+        Layer.provide(launchDependencies),
+        Layer.provide(adapters.pipe(Layer.provide(McpProviderSessions.layer))),
+        Layer.provide(layerUnusedScheduledTaskStub),
+        Layer.provide(ThreadSearch.layer.pipe(Layer.provide(database))),
+        Layer.provide(layerUnusedPeerServices),
+        Layer.provide(Layer.mock(DocumentText.DocumentText)({})),
+        Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+        Layer.provide(
+          Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({}),
+        ),
+        Layer.provide(
+          SecretRequests.layer.pipe(
+            Layer.provide(layerMemorySecretStore),
+            Layer.provide(Layer.mock(SecretResolver.SecretResolver)({})),
+            Layer.provide(layerThreads),
+          ),
+        ),
+      );
+      const http = McpHttpServer.layerMcpTransport(registrations).pipe(
+        Layer.provide(McpOAuth.layerMcpClientAuthenticator),
+        Layer.provide(settings),
+      );
+
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const otherThreadId = ThreadId.make("thread:mcp-folders-other");
+        yield* createReplayThread(parentThreadId, "Folder MCP parent", cwd);
+        yield* createReplayThread(otherThreadId, "Folder MCP other", cwd);
+        const parentStart = yield* startReplayParent;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        yield* worker.drain();
+        yield* awaitReplayParent(parentStart.sequence);
+
+        const registry = yield* McpSessionRegistry.McpSessionRegistry;
+        const provider = yield* registry.issue({
+          threadId: parentThreadId,
+          providerInstanceId: codexInstanceId,
+        });
+        const auth = yield* EnvironmentAuth.EnvironmentAuth;
+        const oauth = yield* auth.issueMcpClientSession({
+          label: "Folders read-only",
+          access: "read-only",
+          peerLink: false,
+          client: { deviceType: "bot" },
+        });
+        yield* HttpRouter.serve(http, { disableListenLog: true, disableLogger: true }).pipe(
+          Layer.build,
+        );
+
+        const agent = yield* connectHttpMcp(provider.config.authorizationHeader);
+        const reader = yield* connectHttpMcp(`Bearer ${oauth.token}`);
+        const listTool = "t3_thread_folder_list";
+        const readTool = "t3_thread_folder_read";
+        const manageTool = "t3_thread_folder_manage";
+        expect(yield* agent.list()).toEqual(
+          expect.arrayContaining([listTool, readTool, manageTool]),
+        );
+        expect(yield* reader.list()).toEqual(expect.arrayContaining([listTool, readTool]));
+        expect(
+          yield* reader.failure(manageTool, { action: "create", name: "Denied" }),
+        ).toMatchObject({
+          code: "capability_denied",
+        });
+
+        const decodeFolderId = Schema.decodeUnknownEffect(
+          Schema.Struct({ folderId: Schema.String }),
+        );
+        const inherited = yield* agent
+          .success(manageTool, { action: "create", name: "Source" })
+          .pipe(Effect.flatMap(decodeFolderId));
+        const explicit = yield* agent
+          .success(manageTool, { action: "create", name: "Target" })
+          .pipe(Effect.flatMap(decodeFolderId));
+        const source = { id: inherited.folderId, name: "Source" };
+        const target = { id: explicit.folderId, name: "Target" };
+        expect(yield* reader.success(listTool, {})).toEqual({ folders: [source, target] });
+        yield* agent.success(manageTool, {
+          action: "move",
+          folderId: source.id,
+          threadIds: [parentThreadId, otherThreadId],
+        });
+        expect(yield* agent.success(readTool, {})).toEqual({
+          threadId: parentThreadId,
+          folder: source,
+        });
+        expect(yield* reader.success(readTool, { folderId: source.id })).toEqual({
+          folder: source,
+          threads: expect.arrayContaining([
+            { threadId: parentThreadId, projectId, title: "Folder MCP parent" },
+            { threadId: otherThreadId, projectId, title: "Folder MCP other" },
+          ]),
+          nextCursor: null,
+        });
+        const folders = yield* orchestrator.threadFolders;
+        const beforeInvalid = yield* folders.snapshot();
+        for (const [folderId, threadIds, code] of [
+          [target.id, [parentThreadId, "thread:mcp-folders-missing"], "thread_not_found"],
+          ["missing-folder", [parentThreadId, otherThreadId], "invalid_request"],
+        ] as const) {
+          expect(
+            yield* agent.failure(manageTool, { action: "move", folderId, threadIds }),
+          ).toMatchObject({ code });
+          expect(yield* folders.snapshot()).toEqual(beforeInvalid);
+        }
+
+        const created = yield* agent
+          .success("create_threads", {
+            clientRequestId: "folders-create",
+            threads: [
+              { title: "Inherited" },
+              { title: "Explicit", folderId: target.id },
+              { title: "Unassigned", folderId: null },
+            ],
+          })
+          .pipe(Effect.flatMap(Schema.decodeUnknownEffect(OrchestratorMcpCreateThreadsResult)));
+        expect(created.threads).toHaveLength(3);
+        for (const [index, folder] of [source, target, null].entries()) {
+          const threadId = created.threads[index]!.threadId;
+          expect(yield* agent.success(readTool, { threadId })).toEqual({ threadId, folder });
+        }
+
+        const decodeLaunched = Schema.decodeUnknownEffect(Schema.Struct({ threadId: ThreadId }));
+        for (const [index, folder] of [source, target, null].entries()) {
+          const folderChoice = index === 0 ? {} : { folderId: folder?.id ?? null };
+          const child = yield* agent
+            .success("delegate_task", {
+              task: delegatedPrompt,
+              mode: "async",
+              clientRequestId: `folders-delegate-${index}`,
+              ...folderChoice,
+            })
+            .pipe(Effect.flatMap(decodeDelegateTaskResult));
+          const threadId = localChild(child.childThreadId);
+          expect(yield* agent.success(readTool, { threadId })).toEqual({ threadId, folder });
+          const launched = yield* agent
+            .success("t3_thread_launch", {
+              title: `Folder launch ${index}`,
+              clientRequestId: `folders-launch-${index}`,
+              ...folderChoice,
+            })
+            .pipe(Effect.flatMap(decodeLaunched));
+          expect(yield* agent.success(readTool, launched)).toEqual({ ...launched, folder });
+        }
+
+        yield* agent.success(manageTool, {
+          action: "rename",
+          folderId: target.id,
+          name: "Renamed",
+        });
+        yield* agent.success(manageTool, {
+          action: "reorder",
+          folderId: target.id,
+          beforeFolderId: source.id,
+        });
+        expect(yield* reader.success(listTool, {})).toEqual({
+          folders: [{ id: target.id, name: "Renamed" }, source],
+        });
+        const explicitThreadId = created.threads[1]!.threadId;
+        yield* agent.success(manageTool, { action: "delete", folderId: target.id });
+        expect(yield* reader.success(listTool, {})).toEqual({ folders: [source] });
+        expect(yield* agent.success(readTool, { threadId: explicitThreadId })).toEqual({
+          threadId: explicitThreadId,
+          folder: null,
+        });
+      }).pipe(
+        Effect.provide(
+          Layer.merge(layerThreads, layerAuth).pipe(
+            Layer.provideMerge(NodeHttpServer.layerTest),
+            Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+          ),
+        ),
+      );
+    }),
+  );
+
   it.live.each([
     { label: "distinct", result: queuedFollowupResult, latestSummary: queuedFollowupResult },
     { label: "identical", result: delegatedResult, latestSummary: null },
@@ -250,13 +654,6 @@ describe("orchestrator MCP toolkit", () => {
           ),
         ),
       );
-      const layerProviderRegistry = ProviderRegistryMock.layer([
-        makeProviderSnapshot({
-          instanceId: codexInstanceId,
-          driver: ProviderDriverKind.make("codex"),
-          model: codexModel,
-        }),
-      ]);
       const layerTest = layerOrchestratorToolkit.pipe(
         Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
         Layer.provideMerge(layerOrchestration),
@@ -265,12 +662,10 @@ describe("orchestrator MCP toolkit", () => {
             Layer.provide(McpProviderSessions.layer),
           ),
         ),
-        Layer.provide(layerProviderRegistry),
+        Layer.provide(layerCodexProvider),
         Layer.provide(ServerSettings.layerTest()),
         Layer.provide(layerUnusedScheduledTaskStub),
-        Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
-        Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
-        Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
+        Layer.provide(layerUnusedPeerServices),
         Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
         Layer.provideMerge(
           SecretRequests.layer.pipe(
@@ -279,58 +674,15 @@ describe("orchestrator MCP toolkit", () => {
             Layer.provide(layerOrchestration),
           ),
         ),
-        Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
         Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
       );
 
       yield* Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const server = yield* McpServer.McpServer;
-        const parentCreate = yield* orchestrator.dispatch({
-          type: "thread.create",
-          createdBy: "user",
-          creationSource: "web",
-          commandId: CommandId.make("command:mcp-replay-parent:create"),
-          threadId: parentThreadId,
-          projectId,
-          title: "MCP replay parent",
-          modelSelection: codexSelection,
-          runtimeMode: "full-access",
-          interactionMode: "default",
-          branch: null,
-          worktreePath: cwd,
-        });
-        yield* orchestrator.dispatch({
-          type: "message.dispatch",
-          createdBy: "user",
-          creationSource: "web",
-          commandId: CommandId.make("command:mcp-replay-parent:start"),
-          threadId: parentThreadId,
-          messageId: MessageId.make("message:mcp-replay-parent:start"),
-          text: parentPrompt,
-          attachments: [],
-          modelSelection: codexSelection,
-          dispatchMode: { type: "start_immediately" },
-        });
-        yield* orchestrator
-          .streamStoredEventsFrom({
-            threadId: parentThreadId,
-            afterSequence: parentCreate.sequence,
-          })
-          .pipe(
-            Stream.filter(
-              (stored) =>
-                stored.event.type === "provider-turn.updated" &&
-                stored.event.payload.status === "running",
-            ),
-            Stream.runHead,
-            Effect.flatMap(
-              Option.match({
-                onNone: () => Effect.die("Parent provider turn did not start."),
-                onSome: () => Effect.void,
-              }),
-            ),
-          );
+        yield* createReplayThread(parentThreadId, "MCP replay parent", cwd);
+        const parentStart = yield* startReplayParent;
+        yield* awaitReplayParent(parentStart.sequence);
 
         const invocation: McpInvocationContext.McpInvocationScope = {
           environmentId: EnvironmentId.make("environment:mcp-replay"),

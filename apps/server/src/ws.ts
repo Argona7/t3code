@@ -2314,6 +2314,8 @@ export const layerWsRpc = (
           Effect.flatMap(threadManagement.threadFolders, (folders) => folders.remove(input)),
         [WS_METHODS.threadFoldersMove]: (input) =>
           Effect.flatMap(threadManagement.threadFolders, (folders) => folders.move(input)),
+        [WS_METHODS.threadFoldersReorder]: (input) =>
+          Effect.flatMap(threadManagement.threadFolders, (folders) => folders.reorder(input)),
         [WS_METHODS.scheduledTasksSubscribe]: (_input) =>
           scheduledTasks.subscribeList().pipe(Stream.map(withVisibleWebhookUrls)),
         [WS_METHODS.scheduledTasksUpsert]: (input) => scheduledTasks.upsert(input),

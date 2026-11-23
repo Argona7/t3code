@@ -5,6 +5,7 @@ import { createWorkspaceFocusController, workspaceAreaProps } from "../lib/works
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import {
   DEFAULT_CLIENT_SETTINGS,
+  type ContextMenuItem,
   EnvironmentId,
   type LocalApi,
   ProjectId,
@@ -12,18 +13,22 @@ import {
   type ScopedThreadRef,
 } from "@t3tools/contracts";
 import { isMacPlatform } from "@t3tools/shared/keybindings";
+import { AsyncResult } from "effect/reactivity";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { userEvent } from "vite-plus/test/browser";
 
 import { act, fakeTimers, render } from "../../test/render";
 import { openCommandPalette } from "../commandPaletteBus";
+import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 import { makeThreadFixture } from "../test-fixtures";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useNowMinute } from "../hooks/useNowMinute";
+import { readThreadFolderMenuSnapshot } from "../hooks/useThreadFolders";
 import { __setClientSettingsForTests, getClientSettings } from "../hooks/useSettings";
 import { useThreadRouteTarget } from "../hooks/useThreadRouteTarget";
 import { useProjects, useServerConfigs, useQuietThreadShells } from "../state/entities";
 import { readEnvironmentScope, useEnvironmentScope } from "../state/session";
+import { serverEnvironment } from "../state/server";
 import { useOrchestrationCommand } from "../state/use-orchestration-command";
 import { useTerminalUiStateStore } from "../terminalUiStateStore";
 import { readLocalApi } from "../localApi";
@@ -40,6 +45,7 @@ vi.mock(import("../state/olderSettledShelf"), async (original) => {
 vi.mock("../state/entities", { spy: true });
 vi.mock("../hooks/useHandleNewThread", { spy: true });
 vi.mock("../hooks/useNowMinute", { spy: true });
+vi.mock("../hooks/useThreadFolders", { spy: true });
 vi.mock("../hooks/useThreadRouteTarget", { spy: true });
 vi.mock("./sidebar/SidebarThreadRow", { spy: true });
 vi.mock("../state/session", { spy: true });
@@ -53,7 +59,18 @@ vi.mock(import("../state/server"), async (original) => {
     { key: "mod+1", command: "thread.jump.1" },
     { key: "mod+2", command: "thread.jump.2" },
   ]);
-  return { ...(await original()), primaryServerKeybindingsAtom: Atom.make(keybindings) };
+  const actual = await original();
+  return {
+    ...actual,
+    primaryServerKeybindingsAtom: Atom.make(keybindings),
+    serverEnvironment: {
+      ...actual.serverEnvironment,
+      moveThreadToFolder: {
+        ...actual.serverEnvironment.moveThreadToFolder,
+        run: vi.fn(actual.serverEnvironment.moveThreadToFolder.run),
+      },
+    },
+  };
 });
 vi.mock("../commandPaletteBus", () => ({
   openCommandPalette: vi.fn(),
@@ -265,6 +282,92 @@ describe("sidebar thread rename", () => {
 });
 
 describe("sidebar thread menu", () => {
+  it("offers and files an unopened remote thread and draft in their own server's folder", async () => {
+    const localProject = project("local-project");
+    const remoteEnvironmentId = EnvironmentId.make("remote");
+    const remoteProject = { ...project("remote-project"), environmentId: remoteEnvironmentId };
+    const localThread = threadShell(localProject.id, 0);
+    const localThreadRef = {
+      environmentId: localProject.environmentId,
+      threadId: localThread.id,
+    };
+    // The same bare thread ID on both servers must never send the move to the local thread.
+    const remoteThread = {
+      ...threadShell(remoteProject.id, 0),
+      environmentId: remoteEnvironmentId,
+      title: "Remote thread",
+    };
+    const draftId = DraftId.make("remote-draft-menu");
+    const initialDrafts = useComposerDraftStore.getState();
+    using cleanup = new DisposableStack();
+    cleanup.defer(() => {
+      useComposerDraftStore.setState(initialDrafts, true);
+      vi.mocked(readThreadFolderMenuSnapshot).mockRestore();
+      vi.mocked(serverEnvironment.moveThreadToFolder.run).mockRestore();
+    });
+    initialDrafts.setProjectDraftThreadId(
+      { environmentId: remoteEnvironmentId, projectId: remoteProject.id },
+      draftId,
+      { threadId: ThreadId.make("remote-draft-thread") },
+    );
+    initialDrafts.setPrompt(draftId, "Remote draft");
+    vi.mocked(useProjects).mockReturnValue([localProject, remoteProject]);
+    vi.mocked(useQuietThreadShells).mockReturnValue([localThread, remoteThread]);
+    vi.mocked(useThreadRouteTarget).mockReturnValue({
+      kind: "server",
+      threadRef: localThreadRef,
+    });
+    vi.mocked(useHandleNewThread).mockReturnValue({
+      activeDraftThread: null,
+      activeThread: null,
+      defaultProjectRef: {
+        environmentId: localProject.environmentId,
+        projectId: localProject.id,
+      },
+      defaultProjectFallbackReady: true,
+      handleNewThread: vi.fn().mockResolvedValue(null),
+      routeDraftId: null,
+      routeThreadRef: localThreadRef,
+    });
+    vi.mocked(readThreadFolderMenuSnapshot).mockImplementation(async (environmentId) => ({
+      revision: 0,
+      folders: [
+        environmentId === remoteEnvironmentId
+          ? { id: "remote-folder", name: "Remote folder", color: 0 }
+          : { id: "local-folder", name: "Local folder", color: 1 },
+      ],
+      assignments: {},
+    }));
+    const move = vi.mocked(serverEnvironment.moveThreadToFolder.run);
+    move.mockResolvedValue(AsyncResult.success(undefined));
+    const show = vi.fn(
+      async (items: readonly ContextMenuItem[]) =>
+        items
+          .find((item) => item.id === "move-to-folder")
+          ?.children?.find((item) => item.label === "Remote folder")?.id ?? null,
+    );
+    vi.mocked(readLocalApi).mockReturnValue({ contextMenu: { show } } as unknown as LocalApi);
+    await using screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+      </SidebarProvider>,
+    );
+    await userEvent.click(screen.getByText("Remote thread").first(), { button: "right" });
+    await vi.waitFor(() =>
+      expect(move).toHaveBeenCalledExactlyOnceWith(expect.anything(), {
+        environmentId: remoteEnvironmentId,
+        input: { threadId: remoteThread.id, folderId: "remote-folder" },
+      }),
+    );
+    await userEvent.click(screen.getByTestId("sidebar-draft-row"), { button: "right" });
+    await vi.waitFor(() =>
+      expect(useComposerDraftStore.getState().getDraftSession(draftId)?.folderId).toBe(
+        "remote-folder",
+      ),
+    );
+    expect(move).toHaveBeenCalledTimes(1);
+  });
+
   it("tells the menu whether the keyboard opened it", async () => {
     const activeProject = project("active");
     const thread = threadShell(activeProject.id, 0);

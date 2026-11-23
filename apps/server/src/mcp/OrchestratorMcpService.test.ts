@@ -2892,6 +2892,19 @@ describe("OrchestratorMcpService provider resolution", () => {
             threads: [{ target: { driverKind: driver, model } }],
             clientRequestId: "create-retry",
           };
+          const beforeWrongTarget = yield* orchestrator.countThreads();
+          for (const target of [
+            { environmentId: EnvironmentId.make("environment:elsewhere") },
+            { environmentId: scope.environmentId, projectId: ProjectId.make("project:elsewhere") },
+          ]) {
+            const refusal = yield* service
+              .createThreads(scope, {
+                threads: [request.threads[0]!, { target, folderId: explicitFolder.id }],
+              })
+              .pipe(Effect.flip);
+            assert.equal(refusal.code, "invalid_request");
+            assert.deepEqual(yield* orchestrator.countThreads(), beforeWrongTarget);
+          }
           const first = yield* service.createThreads(scope, request);
           const child = first.threads[0]!;
           const selection = parentEnabled
@@ -2908,7 +2921,15 @@ describe("OrchestratorMcpService provider resolution", () => {
 
           const explicitRequest = {
             threads: [
-              { ...request.threads[0]!, folderId: explicitFolder.id, prompt: "Start work." },
+              {
+                target: {
+                  ...request.threads[0]!.target,
+                  environmentId: scope.environmentId,
+                  projectId,
+                },
+                folderId: explicitFolder.id,
+                prompt: "Start work.",
+              },
             ],
             clientRequestId: "explicit-folder",
           };

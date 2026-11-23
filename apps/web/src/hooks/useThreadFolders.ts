@@ -1,9 +1,9 @@
 import { useAtomValue } from "@effect/atom-react";
 import type {
   EnvironmentId,
+  ScopedThreadRef,
   ThreadFolder,
   ThreadFolderSnapshot,
-  ThreadId,
 } from "@t3tools/contracts";
 import {
   isAtomCommandInterrupted,
@@ -11,6 +11,7 @@ import {
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
 import * as Schema from "effect/Schema";
+import * as SchemaGetter from "effect/SchemaGetter";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { readLocalStorageValue, useLocalStorage } from "./useLocalStorage";
 import { appAtomRegistry } from "../rpc/atomRegistry";
@@ -19,30 +20,62 @@ import { themeEnvironmentIdAtom } from "../state/primaryEnvironment";
 import { environmentServerConfigsAtom, serverEnvironment } from "../state/server";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useEnvironmentQuerySelector } from "../state/query";
+import { waitForQuerySettled } from "../state/waitForQuerySettled";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 
-const Selection = Schema.Struct({
+const LegacySelection = Schema.Struct({
   folderId: Schema.NullOr(Schema.String),
   showAll: Schema.Boolean,
 });
-const DEFAULT_SELECTION = { folderId: null, showAll: false } satisfies typeof Selection.Type;
+const FolderSelection = Schema.Struct({
+  folderId: Schema.NullOr(Schema.String),
+  allMode: Schema.Literals(["all", "unfiled"]),
+});
+const StoredSelection = Schema.Struct({
+  ...FolderSelection.fields,
+  showAll: Schema.optionalKey(Schema.Boolean),
+});
+export const ThreadFolderSelection = Schema.Union([StoredSelection, LegacySelection]).pipe(
+  Schema.decodeTo(FolderSelection, {
+    decode: SchemaGetter.transform((value) => {
+      if ("allMode" in value) return value;
+      // Older clients could remember a custom ID while the global filter was active.
+      return value.showAll
+        ? { folderId: null, allMode: "all" as const }
+        : { folderId: value.folderId, allMode: "unfiled" as const };
+    }),
+    // Older clients sharing this storage key read showAll as the active view.
+    encode: SchemaGetter.transform((value) => ({
+      ...value,
+      showAll: value.folderId === null && value.allMode === "all",
+    })),
+  }),
+);
+const DEFAULT_SELECTION = {
+  folderId: null,
+  allMode: "unfiled",
+} satisfies typeof FolderSelection.Type;
+
 const EMPTY_FOLDERS: readonly ThreadFolder[] = [];
 const EMPTY_ASSIGNMENTS: Readonly<Record<string, string>> = {};
 
-const folderEnvironmentAtom = Atom.make((get) => {
+const defaultFolderEnvironmentAtom = Atom.make((get) => {
   const environments = get(environmentSummaries.environmentIdsAtom);
   const preferred = get(themeEnvironmentIdAtom);
   const connected =
     preferred === null && environments.length > 1
       ? get(environmentSummaries.connectedEnvironmentIdsAtom)
       : environments;
-  const environmentId = preferred ?? (connected.length === 1 ? connected[0]! : null);
-  if (environmentId === null) return null;
-  return get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
-    .threadFolders === true
-    ? environmentId
-    : null;
+  return preferred ?? (connected.length === 1 ? connected[0]! : null);
 });
+
+const folderCapabilitiesAtom = Atom.family((environmentId: EnvironmentId | null) =>
+  Atom.make((get) =>
+    environmentId === null
+      ? undefined
+      : get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities,
+  ),
+);
 
 function selectionKey(environmentId: EnvironmentId | null) {
   return `t3code:sidebar:thread-folders:${environmentId ?? "disconnected"}`;
@@ -54,6 +87,29 @@ function snapshotAtom(environmentId: EnvironmentId) {
 
 function snapshotValue<E>(snapshot: AsyncResult.AsyncResult<ThreadFolderSnapshot, E>) {
   return AsyncResult.getOrElse(snapshot, () => null);
+}
+
+export async function readThreadFolderMenuSnapshot(
+  environmentId: EnvironmentId,
+  kind: "thread" | "draft",
+  signal: AbortSignal,
+) {
+  const available = () =>
+    !signal.aborted &&
+    appAtomRegistry.get(environmentSummaries.connectedEnvironmentIdsAtom).includes(environmentId) &&
+    appAtomRegistry.get(folderCapabilitiesAtom(environmentId))?.threadFolders === true &&
+    (kind === "draft" ||
+      appAtomRegistry.get(serverEnvironment.moveThreadToFolder.permissionAtom(environmentId)));
+  if (!available()) return null;
+  // An unopened remote catalog has no sidebar subscription. Give its first
+  // snapshot a bounded wait so a dropped connection cannot block the menu.
+  const snapshot = await waitForQuerySettled({
+    registry: appAtomRegistry,
+    atom: snapshotAtom(environmentId),
+    settle: (snapshot) => snapshot ?? undefined,
+    signal: AbortSignal.any([signal, AbortSignal.timeout(2_000)]),
+  });
+  return available() ? (snapshot ?? null) : null;
 }
 
 function knownFolderId(folders: readonly ThreadFolder[], folderId: string | null) {
@@ -72,13 +128,14 @@ export function resolveThreadFolderId(environmentId: EnvironmentId, folderId: st
 }
 
 export function getSelectedThreadFolderId(environmentId: EnvironmentId) {
-  if (appAtomRegistry.get(folderEnvironmentAtom) !== environmentId) return null;
+  if (appAtomRegistry.get(folderCapabilitiesAtom(environmentId))?.threadFolders !== true)
+    return null;
   const selection = readLocalStorageValue(
     selectionKey(environmentId),
     DEFAULT_SELECTION,
-    Selection,
+    ThreadFolderSelection,
   );
-  return selection.showAll ? null : resolveThreadFolderId(environmentId, selection.folderId);
+  return resolveThreadFolderId(environmentId, selection.folderId);
 }
 
 async function reportFolderMutation<A, E>(
@@ -100,8 +157,12 @@ async function reportFolderMutation<A, E>(
   return null;
 }
 
-export function useThreadFolders() {
-  const environmentId = useAtomValue(folderEnvironmentAtom);
+export function useThreadFolders(shownEnvironmentId: EnvironmentId | null) {
+  const defaultEnvironmentId = useAtomValue(defaultFolderEnvironmentAtom);
+  // Desktop can host its own server while showing a thread on another Mac.
+  const target = shownEnvironmentId ?? defaultEnvironmentId;
+  const capabilities = useAtomValue(folderCapabilitiesAtom(target));
+  const environmentId = capabilities?.threadFolders === true ? target : null;
   const snapshot = useEnvironmentQuerySelector(
     environmentId === null ? null : snapshotAtom(environmentId),
     snapshotValue,
@@ -109,8 +170,13 @@ export function useThreadFolders() {
   const [selection, setSelection] = useLocalStorage(
     selectionKey(environmentId),
     DEFAULT_SELECTION,
-    Selection,
+    ThreadFolderSelection,
   );
+  const supportsReorder = capabilities?.threadFolderReorder === true;
+  const canReorder = useAtomValue(
+    serverEnvironment.reorderThreadFolder.permissionAtom(environmentId),
+  );
+  const reorder = useAtomCommand(serverEnvironment.reorderThreadFolder, { reportFailure: false });
   const canManage = useAtomValue(
     serverEnvironment.createThreadFolder.permissionAtom(environmentId),
   );
@@ -118,12 +184,15 @@ export function useThreadFolders() {
   const rename = useAtomCommand(serverEnvironment.renameThreadFolder, { reportFailure: false });
   const remove = useAtomCommand(serverEnvironment.deleteThreadFolder, { reportFailure: false });
   const move = useAtomCommand(serverEnvironment.moveThreadToFolder, { reportFailure: false });
+  const canMove = useAtomValue(serverEnvironment.moveThreadToFolder.permissionAtom(environmentId));
   const folders = snapshot?.folders ?? EMPTY_FOLDERS;
   const folderId =
     snapshot === null ? selection.folderId : knownFolderId(folders, selection.folderId);
-  const draftFolderScope = environmentId === null || selection.showAll ? undefined : folderId;
+  const showAll = selection.allMode === "all";
+  const isAllThreadsView = folderId === null && showAll;
+  const draftFolderScope = environmentId === null || isAllThreadsView ? undefined : folderId;
   const scope =
-    environmentId === null || selection.showAll || (snapshot === null && folderId === null)
+    environmentId === null || isAllThreadsView || (snapshot === null && folderId === null)
       ? undefined
       : {
           environmentId,
@@ -136,13 +205,25 @@ export function useThreadFolders() {
     ready: snapshot !== null,
     canManage,
     folders,
-    assignments: snapshot?.assignments,
+    canMove,
     scope,
     draftFolderScope,
     folderId,
-    showAll: selection.showAll,
-    selectFolder: (next: string | null) => setSelection({ folderId: next, showAll: false }),
-    toggleShowAll: () => setSelection((current) => ({ ...current, showAll: !current.showAll })),
+    showAll,
+    isAllThreadsView,
+    selectFolder: (folderId: string | null) =>
+      setSelection((current) => ({ ...current, folderId })),
+    selectAllMode: (all: boolean) =>
+      setSelection({ folderId: null, allMode: all ? "all" : "unfiled" }),
+    canReorder: supportsReorder && canReorder,
+    reorder: async (folderId: string, beforeFolderId: string | null) =>
+      environmentId !== null &&
+      supportsReorder &&
+      canReorder &&
+      (await reportFolderMutation(
+        reorder({ environmentId, input: { folderId, beforeFolderId } }),
+        "Could not reorder folders",
+      )) !== null,
     create: async (name: string) =>
       environmentId === null
         ? null
@@ -164,8 +245,7 @@ export function useThreadFolders() {
         remove({ environmentId, input: { folderId } }),
         "Could not delete folder",
       )) !== null,
-    move: async (threadId: ThreadId, folderId: string | null) =>
-      environmentId !== null &&
+    move: async ({ environmentId, threadId }: ScopedThreadRef, folderId: string | null) =>
       (await reportFolderMutation(
         move({ environmentId, input: { threadId, folderId } }),
         "Could not move thread",

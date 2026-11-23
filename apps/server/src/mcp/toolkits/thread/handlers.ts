@@ -6,6 +6,7 @@ import {
   type RunId,
   OrchestratorMcpFailure,
   type OrchestrationV2Command,
+  type ThreadFolderError,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
@@ -18,9 +19,10 @@ import {
   newCommandId,
   readCaller,
   readThread,
+  resolveThreadId,
   unavailable,
 } from "../../threadAccess.ts";
-import type * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTasks from "../../../scheduledTasks/ScheduledTaskService.ts";
 import { queuedRunsInDeliveryOrder } from "../../../orchestration-v2/QueuedRunOrder.ts";
@@ -106,6 +108,16 @@ const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A,
   handle: (params: P) => Effect.Effect<A, E, R>,
 ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
 
+const folderFailure = (error: ThreadFolderError | OrchestratorMcpFailure) =>
+  error._tag !== "ThreadFolderError"
+    ? error
+    : error.code === "storage"
+      ? unavailable()
+      : new OrchestratorMcpFailure({
+          code: error.threadId === undefined ? "invalid_request" : "thread_not_found",
+          message: error.message,
+        });
+
 export const layer = McpToolAccess.toLayer(ThreadToolkit, {
   t3_thread_folder_list: McpToolAccess.reads(() =>
     Effect.gen(function* () {
@@ -114,6 +126,71 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       const folders = yield* service.list().pipe(Effect.mapError(unavailable));
       return { folders: folders.map(({ id, name }) => ({ id, name })) };
     }),
+  ),
+  t3_thread_folder_read: McpToolAccess.reads((input) =>
+    Effect.gen(function* () {
+      const caller = yield* readCaller();
+      const folders = yield* caller.threads.threadFolders;
+      if (input.folderId !== undefined) {
+        if (input.threadId !== undefined)
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "Pass either folderId or threadId.",
+          });
+        return yield* folders
+          .members({ folderId: input.folderId, cursor: input.cursor, limit: input.limit ?? 25 })
+          .pipe(Effect.mapError(folderFailure));
+      }
+      if (input.cursor !== undefined || input.limit !== undefined)
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "Pass folderId to page through its members.",
+        });
+      const threadId = yield* resolveThreadId(caller, input.threadId);
+      return yield* folders.membership(threadId).pipe(Effect.mapError(folderFailure));
+    }),
+  ),
+  t3_thread_folder_manage: McpToolAccess.either(
+    (input) => input.action === "move",
+    McpToolAccess.writesThreads(
+      (input) => [...new Set(input.threadIds)],
+      (input, check) =>
+        Effect.gen(function* () {
+          const { threads } = yield* readCaller();
+          const threadIds = yield* required(input.threadIds, "threadIds");
+          const folderId = yield* required(input.folderId, "folderId");
+          const folders = yield* threads.threadFolders;
+          return yield* folders
+            .moveMany({ threadIds, folderId }, check)
+            .pipe(Effect.mapError(folderFailure));
+        }),
+    ),
+    McpToolAccess.writesEnvironment((input, check) =>
+      Effect.gen(function* () {
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const folders = yield* threads.threadFolders;
+        if (input.action === "create") {
+          const name = yield* required(input.name, "name");
+          const folder = yield* folders
+            .create({ name }, check)
+            .pipe(Effect.mapError(folderFailure));
+          return { folderId: folder.id };
+        }
+        const folderId = yield* required(input.folderId ?? undefined, "folderId");
+        if (input.action === "rename") {
+          const name = yield* required(input.name, "name");
+          yield* folders.rename({ folderId, name }, check).pipe(Effect.mapError(folderFailure));
+        } else if (input.action === "delete") {
+          yield* folders.remove({ folderId }, check).pipe(Effect.mapError(folderFailure));
+        } else {
+          const beforeFolderId = yield* required(input.beforeFolderId, "beforeFolderId");
+          yield* folders
+            .reorder({ folderId, beforeFolderId }, check)
+            .pipe(Effect.mapError(folderFailure));
+        }
+        return { folderId };
+      }),
+    ),
   ),
   run_scheduled_task_now: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {

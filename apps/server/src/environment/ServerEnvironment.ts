@@ -221,6 +221,7 @@ export const make = Effect.gen(function* () {
     ...(databaseMigration === undefined ? {} : { databaseMigration }),
     capabilities: {
       threadFolders: true,
+      threadFolderReorder: true,
       repositoryIdentity: true,
       connectionProbe: true,
       attachmentUploads: true,

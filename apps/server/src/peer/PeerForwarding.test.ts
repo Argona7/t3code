@@ -60,6 +60,9 @@ interface Seen {
   readonly launches: ReadonlyArray<ThreadLaunch.ThreadLaunchInput>;
   readonly projects: ReadonlyArray<ProjectService.ProjectCreateInput>;
   readonly clones: ReadonlyArray<SourceControlCloneRepositoryInput>;
+  readonly folderMoves: ReadonlyArray<
+    Parameters<ThreadFolders.ThreadFolders["Service"]["moveMany"]>[0]
+  >;
   /** Commands dispatched and delegated-task stops, as `<type> <threadId>`. */
   readonly stops: ReadonlyArray<string>;
 }
@@ -69,6 +72,7 @@ const nothingSeen: Seen = {
   launches: [],
   projects: [],
   clones: [],
+  folderMoves: [],
   stops: [],
 };
 
@@ -97,7 +101,25 @@ const boxThreads = (seen: Ref.Ref<Seen>, linkSession: Ref.Ref<string>) => {
   return Layer.mock(ThreadManagement.ThreadManagementService)({
     threadFolders: ThreadFolders.ThreadFolders.pipe(
       Effect.provide(
-        Layer.mock(ThreadFolders.ThreadFolders)({ list: () => Effect.succeed([boxFolder]) }),
+        Layer.mock(ThreadFolders.ThreadFolders)({
+          list: () => Effect.succeed([boxFolder]),
+          members: () =>
+            Effect.succeed({
+              folder: { id: boxFolder.id, name: boxFolder.name },
+              threads: [{ threadId: boxThread, projectId: boxProject, title: base.title }],
+              nextCursor: null,
+            }),
+          moveMany: (input, check) =>
+            check.pipe(
+              Effect.andThen(
+                Ref.update(seen, (current) => ({
+                  ...current,
+                  folderMoves: [...current.folderMoves, input],
+                })),
+              ),
+              Effect.as(input),
+            ),
+        }),
       ),
     ),
     getThreadShell: shellOf,
@@ -679,6 +701,38 @@ it.effect("runs any tool that takes a linked environment there", () =>
       expect(archived.isError).toBe(false);
       expect((yield* Ref.get(seen)).stops).toEqual([`thread.archive ${boxThread}`]);
 
+      const membership = yield* a.call("thread:laptop-full", "t3_thread_folder_read", {
+        environmentId: box.environmentId,
+        folderId: boxFolder.id,
+      });
+      expect(membership.structuredContent).toMatchObject({
+        folder: { id: boxFolder.id },
+        threads: [{ threadId: boxThread, projectId: boxProject }],
+      });
+      const move = (caller: string, threadIds: ReadonlyArray<ThreadId>) =>
+        a.call(caller, "t3_thread_folder_manage", {
+          environmentId: box.environmentId,
+          action: "move",
+          threadIds,
+          folderId: boxFolder.id,
+        });
+      const mixed = yield* move("thread:laptop-full", [boxThread, usersThread]);
+      expect(failureOf(mixed)).toMatchObject({ code: "capability_denied" });
+      const planned = yield* move("thread:laptop-plan", [boxThread]);
+      expect(failureOf(planned)).toMatchObject({ code: "interaction_mode_escalation_denied" });
+      const rename = yield* a.call("thread:laptop-full", "t3_thread_folder_manage", {
+        environmentId: box.environmentId,
+        action: "rename",
+        folderId: boxFolder.id,
+        name: "Renamed",
+      });
+      expect(failureOf(rename)).toMatchObject({ code: "capability_denied" });
+      const moved = yield* move("thread:laptop-full", [boxThread]);
+      expect(moved.structuredContent).toEqual({ folderId: boxFolder.id, threadIds: [boxThread] });
+      expect((yield* Ref.get(seen)).folderMoves).toEqual([
+        { folderId: boxFolder.id, threadIds: [boxThread] },
+      ]);
+
       // This environment's own id keeps the call here.
       const own = yield* a.call("thread:laptop-full", "t3_thread_configure", {
         environmentId: laptop.environmentId,
@@ -718,6 +772,16 @@ it.effect("refuses what a linked environment cannot take before anything leaves"
         ["t3_thread_list", { environmentId: box.environmentId, projectId: boxProject }],
         ["t3_thread_read", { environmentId: box.environmentId, threadId: boxThread }],
         ["t3_thread_wait", { environmentId: box.environmentId, threadId: boxThread }],
+        ["t3_thread_folder_read", { environmentId: box.environmentId, threadId: boxThread }],
+        [
+          "t3_thread_folder_manage",
+          {
+            environmentId: box.environmentId,
+            action: "move",
+            folderId: boxFolder.id,
+            threadIds: [boxThread],
+          },
+        ],
         [
           "t3_thread_send",
           { environmentId: box.environmentId, threadId: boxThread, message: "Carry on there." },

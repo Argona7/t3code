@@ -1,6 +1,9 @@
 import {
   OrchestratorMcpEnvironmentTarget,
   OrchestratorMcpThreadFolderListResult,
+  ThreadFolderCatalogEntry,
+  ThreadFolderMember,
+  ThreadFolderName,
   ScheduledTaskId,
   ScheduledTask,
   OrchestrationSearchThreadsInput,
@@ -31,20 +34,71 @@ import * as ScheduledTaskService from "../../../scheduledTasks/ScheduledTaskServ
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
-const ThreadFolderListTool = Tool.make("t3_thread_folder_list", {
-  description: "List names and IDs for `folderId` in this environment.",
-  parameters: Schema.Struct({ environmentId: OrchestratorMcpEnvironmentTarget }),
-  success: OrchestratorMcpThreadFolderListResult,
+const folderTool = {
   failure: OrchestratorMcpFailure,
-  failureMode: "return",
+  failureMode: "return" as const,
   dependencies: [
     McpInvocationContext.McpInvocationContext,
     ThreadManagementService.ThreadManagementService,
   ],
+};
+
+const ThreadFolderListTool = Tool.make("t3_thread_folder_list", {
+  ...folderTool,
+  description: "List folder names and IDs in sidebar order.",
+  parameters: Schema.Struct({ environmentId: OrchestratorMcpEnvironmentTarget }),
+  success: OrchestratorMcpThreadFolderListResult,
 })
   .annotate(Tool.Title, "List thread folders")
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false);
+
+const folderId = Schema.NullOr(ThreadFolderCatalogEntry.fields.id.check(Schema.isMaxLength(128)));
+const ThreadFolderReadTool = Tool.make("t3_thread_folder_read", {
+  ...folderTool,
+  description:
+    "Get the folder of `threadId` (default this thread), or list members of `folderId` (null for unassigned) with `cursor` and `limit`.",
+  parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    threadId: Schema.optionalKey(ThreadId),
+    folderId: Schema.optionalKey(folderId),
+    cursor: Schema.optionalKey(ThreadId),
+    limit: Schema.optionalKey(clampedPositiveInt(50)),
+  }),
+  success: Schema.Union([
+    Schema.Struct({ threadId: ThreadId, folder: Schema.NullOr(ThreadFolderCatalogEntry) }),
+    Schema.Struct({
+      folder: Schema.NullOr(ThreadFolderCatalogEntry),
+      threads: Schema.Array(ThreadFolderMember),
+      nextCursor: Schema.NullOr(ThreadId),
+    }),
+  ]),
+})
+  .annotate(Tool.Title, "Read thread folder membership")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false);
+
+const ThreadFolderManageTool = Tool.make("t3_thread_folder_manage", {
+  ...folderTool,
+  description:
+    "Create (`name`), rename (`folderId`, `name`), delete (unfiles threads), reorder before `beforeFolderId` (null for end), or move `threadIds` atomically to `folderId` (null to unfile). Find IDs with t3_thread_folder_list and t3_thread_search. After an uncertain create, check the catalog.",
+  parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    action: Schema.Literals(["create", "rename", "delete", "reorder", "move"]),
+    folderId: Schema.optionalKey(folderId),
+    name: Schema.optionalKey(ThreadFolderName),
+    beforeFolderId: Schema.optionalKey(folderId),
+    threadIds: Schema.optionalKey(
+      Schema.Array(ThreadId).check(Schema.isMinLength(1), Schema.isMaxLength(50)),
+    ),
+  }),
+  success: Schema.Struct({
+    folderId,
+    threadIds: Schema.optionalKey(Schema.Array(ThreadId)),
+  }),
+})
+  .annotate(Tool.Title, "Manage thread folders")
+  .annotate(Tool.Destructive, true);
 
 const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
   description:
@@ -259,6 +313,8 @@ const ScheduledTaskRunTool = Tool.make("run_scheduled_task_now", {
 
 export const ThreadToolkit = Toolkit.make(
   ThreadFolderListTool,
+  ThreadFolderReadTool,
+  ThreadFolderManageTool,
   ScheduledTaskRunTool,
   ThreadSearchTool,
   ThreadConfigureTool,

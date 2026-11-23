@@ -22,8 +22,15 @@ export const initializeThreadFolderSchema = Effect.gen(function* () {
   yield* sql`CREATE TABLE IF NOT EXISTS argona_thread_folders (
     id TEXT PRIMARY KEY NOT NULL,
     name TEXT NOT NULL,
-    color INTEGER NOT NULL CHECK (color BETWEEN 0 AND 7)
+    color INTEGER NOT NULL CHECK (color BETWEEN 0 AND 7),
+    display_order INTEGER
   )`;
+  // Keep version 1 readable by older fork builds. Existing and newly inserted rows
+  // use rowid order until their positions are explicitly saved.
+  const columns = yield* sql<{ readonly name: string }>`PRAGMA table_info(argona_thread_folders)`;
+  if (!columns.some((column) => column.name === "display_order")) {
+    yield* sql`ALTER TABLE argona_thread_folders ADD COLUMN display_order INTEGER`;
+  }
   yield* sql`CREATE TABLE IF NOT EXISTS argona_thread_folder_assignments (
     thread_id TEXT PRIMARY KEY NOT NULL,
     folder_id TEXT NOT NULL REFERENCES argona_thread_folders(id) ON DELETE CASCADE

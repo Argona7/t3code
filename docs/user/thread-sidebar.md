@@ -58,6 +58,30 @@ in a new thread's model picker to add or remove them. A regular click returns to
 single model. Choose a base branch and send. Each selection starts a separate thread
 and worktree while you stay in the new thread composer. This requires a Git project.
 
+## Organize threads in sidebar folders (Argona7 fork)
+
+Use **+** below Search to create a folder. Right-click a thread to move it.
+A folder shows its own drafts and pinned threads. Starting a draft with that
+folder selected assigns it to the folder. Right-click **All** to switch between
+unassigned threads and every thread. Returning a thread to **All** unassigns it.
+
+Scroll the folder row with the mouse wheel or trackpad. Drag a folder to change
+its position. Right-click a folder to open its menu. On a phone, swipe to
+scroll, hold and drag to reorder, or hold and release for the menu.
+Deleting a folder returns its threads to **All**.
+
+Each server stores its folders, their order, and thread assignments. To work on
+your Mac's threads from another computer, install the fork there, connect to
+the host in **Settings → Environments**, and open a thread from that host.
+You can also open the host's web interface in a browser. Each device remembers
+its own folder selection. Unsent drafts stay on the device where you wrote them.
+
+You can ask an agent to find a thread, move several threads into a folder, or
+manage the folders on its server. For example, “Move the release checklist and
+the packaging thread into Development.” A child thread started on the same
+server inherits its parent's folder. Ask for a different folder or **All** to
+override that default.
+
 ## Pin and reorder threads
 
 Pin a thread from its menu to keep it above your active work.

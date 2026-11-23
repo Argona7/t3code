@@ -44,7 +44,7 @@ import {
 } from "./orchestrationV2.ts";
 import { ProviderOptionSelection, ProviderOptionSelectionValue } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
-import { ThreadFolder } from "./threadFolders.ts";
+import { ThreadFolder, ThreadFolderCatalogEntry } from "./threadFolders.ts";
 
 const OrchestratorMcpPrompt = TrimmedNonEmptyString.check(Schema.isMaxLength(120_000));
 const OrchestratorMcpTitle = TrimmedNonEmptyString.check(Schema.isMaxLength(512));
@@ -64,11 +64,11 @@ export const OrchestratorMcpFolderTarget = Schema.optionalKey(
   ]),
 ).annotate({
   description:
-    "ID from `t3_thread_folder_list` in the destination. Omit to inherit on the same server.",
+    "Omit to inherit on the same server. Set only when requested, using a destination folder ID from `t3_thread_folder_list` or null for All.",
 });
 
 export const OrchestratorMcpThreadFolderListResult = Schema.Struct({
-  folders: Schema.Array(ThreadFolder.mapFields(({ id, name }) => ({ id, name }))),
+  folders: Schema.Array(ThreadFolderCatalogEntry),
 });
 
 // OpenCode 1.15 serializes nested MCP union objects as JSON strings; decode that form at the boundary.
@@ -291,7 +291,15 @@ export const OrchestratorMcpCreateThreadRequest = Schema.Struct({
   prompt: Schema.optional(OrchestratorMcpPrompt),
   folderId: OrchestratorMcpFolderTarget,
   title: Schema.optional(OrchestratorMcpTitle),
-  target: Schema.optional(OrchestratorMcpTarget),
+  target: Schema.optional(
+    Schema.Struct({
+      ...OrchestratorMcpTarget.fields,
+      environmentId: Schema.optional(
+        EnvironmentId.annotate({ description: "Current environment only." }),
+      ),
+      projectId: Schema.optional(ProjectId.annotate({ description: "Current project only." })),
+    }),
+  ),
   runtimeMode: Schema.optional(OrchestratorMcpRuntimeMode),
   interactionMode: Schema.optional(OrchestratorMcpInteractionMode),
 });

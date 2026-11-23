@@ -31,6 +31,7 @@ export interface ContextMenuItem<T extends string = string> {
   icon?: string;
   separatorBefore?: boolean;
   checked?: boolean;
+  radio?: boolean;
   children?: readonly ContextMenuItem<T>[];
 }
 
@@ -48,6 +49,7 @@ export interface ContextMenuItemSchemaType {
   readonly icon?: string;
   readonly separatorBefore?: boolean;
   readonly checked?: boolean;
+  readonly radio?: boolean;
   readonly children?: readonly ContextMenuItemSchemaType[];
 }
 
@@ -61,6 +63,7 @@ export const ContextMenuItemSchema: Schema.Codec<ContextMenuItemSchemaType> = Sc
   icon: Schema.optionalKey(Schema.String),
   separatorBefore: Schema.optionalKey(Schema.Boolean),
   checked: Schema.optionalKey(Schema.Boolean),
+  radio: Schema.optionalKey(Schema.Boolean),
   children: Schema.optionalKey(
     Schema.Array(
       Schema.suspend((): Schema.Codec<ContextMenuItemSchemaType> => ContextMenuItemSchema),

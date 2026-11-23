@@ -4,21 +4,34 @@ import {
   ThreadFolderError,
   ThreadFolderName,
   type ThreadFolder,
+  type ThreadFolderCatalogEntry,
+  type ThreadFolderCreate,
+  type ThreadFolderRename,
+  type ThreadFolderDelete,
+  type ThreadFolderMember,
   type ThreadFolderMove,
+  type ThreadFolderReorder,
   type ThreadFolderSnapshot,
   type ThreadId,
 } from "@t3tools/contracts";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Reactivity from "effect/reactivity/Reactivity";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as SqlError from "effect/sql/SqlError";
 
 export interface FolderChoice {
   readonly folderId?: string | null;
   readonly parentThreadId?: ThreadId;
   readonly allowMissing?: boolean;
+}
+
+interface FolderAssignments {
+  readonly folderId: string | null;
+  readonly threadIds: ReadonlyArray<ThreadId>;
 }
 
 const storageError = () =>
@@ -30,7 +43,15 @@ const missing = (folderId: string) =>
     message: `Thread folder ${folderId} does not exist.`,
   });
 
+const missingThread = (threadId: ThreadId) =>
+  new ThreadFolderError({
+    code: "not-found",
+    message: `Thread ${threadId} does not exist.`,
+    threadId,
+  });
+
 const decodeFolderName = Schema.decodeEffect(ThreadFolderName);
+const encodeFolderIds = Schema.encodeEffect(Schema.fromJsonString(Schema.Array(Schema.String)));
 const normalizeName = (name: string) =>
   decodeFolderName(name.trim()).pipe(
     Effect.mapError(
@@ -52,8 +73,66 @@ export const make = Effect.gen(function* () {
   );
 
   const list = Effect.fn("ThreadFolders.list")(function* () {
-    return yield* sql<ThreadFolder>`SELECT id, name, color FROM argona_thread_folders ORDER BY rowid`;
+    return yield* sql<ThreadFolder>`SELECT id, name, color FROM argona_thread_folders
+      ORDER BY display_order NULLS LAST, rowid`;
   }, Effect.mapError(storageError));
+
+  const membership = Effect.fn("ThreadFolders.membership")(
+    function* (threadId: ThreadId) {
+      const [row] = yield* sql<{ id: string | null; name: string | null }>`
+        SELECT f.id, f.name
+        FROM orchestration_v2_projection_threads t
+        LEFT JOIN argona_thread_folder_assignments a ON a.thread_id = t.thread_id
+        LEFT JOIN argona_thread_folders f ON f.id = a.folder_id
+        WHERE t.thread_id = ${threadId} AND t.deleted_at IS NULL`;
+      if (row === undefined) return yield* missingThread(threadId);
+      const folder = row.id === null || row.name === null ? null : { id: row.id, name: row.name };
+      return { threadId, folder };
+    },
+    NodeSqliteClient.readOnly,
+    Effect.catchTags({ SqlError: () => Effect.fail(storageError()) }),
+  );
+
+  const members = Effect.fn("ThreadFolders.members")(
+    function* ({
+      folderId,
+      cursor,
+      limit,
+    }: {
+      readonly folderId: string | null;
+      readonly cursor?: ThreadId | undefined;
+      readonly limit: number;
+    }) {
+      let folder: typeof ThreadFolderCatalogEntry.Type | null = null;
+      if (folderId !== null) {
+        const [entry] = yield* sql<typeof ThreadFolderCatalogEntry.Type>`
+          SELECT id, name FROM argona_thread_folders WHERE id = ${folderId}`;
+        if (entry === undefined) return yield* missing(folderId);
+        folder = entry;
+      }
+      const after = cursor === undefined ? sql`` : sql`AND t.thread_id > ${cursor}`;
+      const members =
+        folderId === null
+          ? sql`LEFT JOIN argona_thread_folder_assignments a ON a.thread_id = t.thread_id
+            WHERE a.thread_id IS NULL`
+          : sql`JOIN argona_thread_folder_assignments a ON a.thread_id = t.thread_id
+            WHERE a.folder_id = ${folderId}`;
+      const rows = yield* sql<typeof ThreadFolderMember.Type>`
+        SELECT t.thread_id AS "threadId", t.project_id AS "projectId", t.title
+        FROM orchestration_v2_projection_threads t
+        ${members} AND t.deleted_at IS NULL ${after}
+        ORDER BY t.thread_id LIMIT ${limit + 1}`;
+      const threads = rows.slice(0, limit);
+      return {
+        folder,
+        threads,
+        nextCursor: (rows.length > limit ? threads.at(-1)?.threadId : undefined) ?? null,
+      };
+    },
+    sql.withTransaction,
+    NodeSqliteClient.readOnly,
+    Effect.catchTags({ SqlError: () => Effect.fail(storageError()) }),
+  );
 
   const snapshot = Effect.fn("ThreadFolders.snapshot")(
     function* () {
@@ -105,61 +184,120 @@ export const make = Effect.gen(function* () {
     if (rows.length > 0) yield* changed;
   }, Effect.mapError(storageError));
 
-  const create = Effect.fn("ThreadFolders.create")(
-    function* (input: { readonly name: string }) {
+  // An agent can lose access while waiting for SQLite's writer. Check under the same lock.
+  function catalogWrite<I, A>(
+    operation: (input: I) => Effect.Effect<A, SqlError.SqlError | ThreadFolderError>,
+  ) {
+    function run(input: I): Effect.Effect<A, ThreadFolderError>;
+    function run<E, R>(
+      input: I,
+      authorize: Effect.Effect<unknown, E, R>,
+    ): Effect.Effect<A, E | ThreadFolderError, R>;
+    function run<E, R>(input: I, authorize: Effect.Effect<unknown, E, R> = Effect.void) {
+      return sql
+        .withTransaction(Effect.andThen(authorize, operation(input)))
+        .pipe(Effect.catchIf(SqlError.isSqlError, () => Effect.fail(storageError())));
+    }
+    return run;
+  }
+
+  const create = catalogWrite(
+    Effect.fn("ThreadFolders.create")(function* (input: typeof ThreadFolderCreate.Type) {
       const name = yield* normalizeName(input.name);
       const rows = yield* sql<ThreadFolder>`INSERT INTO argona_thread_folders (id, name, color)
       VALUES (lower(hex(randomblob(16))), ${name}, COALESCE((SELECT (color + 1) % 8 FROM argona_thread_folders ORDER BY rowid DESC LIMIT 1), 0))
       RETURNING id, name, color`;
       yield* changed;
       return rows[0]!;
-    },
-    sql.withTransaction,
-    Effect.catchTags({ SqlError: () => Effect.fail(storageError()) }),
+    }),
   );
 
-  const rename = Effect.fn("ThreadFolders.rename")(
-    function* (input: { readonly folderId: string; readonly name: string }) {
+  const rename = catalogWrite(
+    Effect.fn("ThreadFolders.rename")(function* (input: typeof ThreadFolderRename.Type) {
       const name = yield* normalizeName(input.name);
       const rows =
         yield* sql`UPDATE argona_thread_folders SET name = ${name} WHERE id = ${input.folderId} RETURNING id`;
       if (rows.length === 0) return yield* missing(input.folderId);
       yield* changed;
-    },
-    sql.withTransaction,
-    Effect.catchTags({ SqlError: () => Effect.fail(storageError()) }),
+    }),
   );
 
-  const remove = Effect.fn("ThreadFolders.remove")(
-    function* (input: { readonly folderId: string }) {
+  const remove = catalogWrite(
+    Effect.fn("ThreadFolders.remove")(function* (input: typeof ThreadFolderDelete.Type) {
       yield* sql`DELETE FROM argona_thread_folder_assignments WHERE folder_id = ${input.folderId}`;
       const rows =
         yield* sql`DELETE FROM argona_thread_folders WHERE id = ${input.folderId} RETURNING id`;
       if (rows.length === 0) return yield* missing(input.folderId);
       yield* changed;
-    },
-    sql.withTransaction,
-    Effect.catchTags({ SqlError: () => Effect.fail(storageError()) }),
+    }),
   );
 
-  const move = Effect.fn("ThreadFolders.move")(
-    function* (input: typeof ThreadFolderMove.Type) {
-      const threads = yield* sql`SELECT 1 FROM orchestration_v2_projection_threads
-      WHERE thread_id = ${input.threadId} AND deleted_at IS NULL`;
-      if (threads.length === 0)
-        return yield* new ThreadFolderError({
-          code: "not-found",
-          message: "The thread does not exist.",
-        });
+  const moveMany: <E, R>(
+    input: FolderAssignments,
+    authorize: Effect.Effect<unknown, E, R>,
+  ) => Effect.Effect<FolderAssignments, E | ThreadFolderError, R> = Effect.fn(
+    "ThreadFolders.moveMany",
+  )(
+    function* <E = never, R = never>(
+      input: FolderAssignments,
+      authorize: Effect.Effect<unknown, E, R>,
+    ) {
+      const threadIds = [...new Set(input.threadIds)];
+      const threads = yield* sql<{ thread_id: ThreadId }>`
+        SELECT thread_id FROM orchestration_v2_projection_threads
+        WHERE thread_id IN ${sql.in(threadIds)} AND deleted_at IS NULL`;
+      const existing = new Set(threads.map(({ thread_id }) => thread_id));
+      const absent = threadIds.find((threadId) => !existing.has(threadId));
+      if (absent !== undefined) return yield* missingThread(absent);
+      yield* authorize;
       const folderId = yield* resolve(input);
-      yield* assign(input.threadId, folderId);
+      const moved =
+        folderId === null
+          ? yield* sql`DELETE FROM argona_thread_folder_assignments
+            WHERE thread_id IN ${sql.in(threadIds)} RETURNING thread_id`
+          : yield* sql`INSERT INTO argona_thread_folder_assignments (thread_id, folder_id)
+            SELECT thread_id, ${folderId} FROM orchestration_v2_projection_threads
+            WHERE thread_id IN ${sql.in(threadIds)}
+            ON CONFLICT(thread_id) DO UPDATE SET folder_id = excluded.folder_id
+            WHERE folder_id != excluded.folder_id RETURNING thread_id`;
+      if (moved.length > 0) yield* changed;
+      return { folderId, threadIds };
     },
     sql.withTransaction,
-    Effect.catchTags({ SqlError: () => Effect.fail(storageError()) }),
+    Effect.catchIf(SqlError.isSqlError, () => Effect.fail(storageError())),
+  );
+
+  const move = (input: typeof ThreadFolderMove.Type) =>
+    moveMany({ threadIds: [input.threadId], folderId: input.folderId }, Effect.void).pipe(
+      Effect.asVoid,
+    );
+
+  const reorder = catalogWrite(
+    Effect.fn("ThreadFolders.reorder")(function* ({
+      folderId,
+      beforeFolderId,
+    }: typeof ThreadFolderReorder.Type) {
+      const ids = (yield* list()).map(({ id }) => id);
+      const from = ids.indexOf(folderId);
+      if (from === -1) return yield* missing(folderId);
+      if (folderId === beforeFolderId) return;
+      ids.splice(from, 1);
+      const to = beforeFolderId === null ? ids.length : ids.indexOf(beforeFolderId);
+      if (beforeFolderId !== null && to === -1) return yield* missing(beforeFolderId);
+      if (from === to) return;
+      ids.splice(to, 0, folderId);
+      const order = yield* encodeFolderIds(ids).pipe(Effect.mapError(storageError));
+      yield* sql`UPDATE argona_thread_folders SET display_order = ordering.key
+        FROM json_each(${order}) AS ordering
+        WHERE argona_thread_folders.id = ordering.value AND display_order IS NOT ordering.key`;
+      yield* changed;
+    }),
   );
 
   return {
     list,
+    membership,
+    members,
     snapshot,
     subscribe: () => changes.stream(keys, snapshot()),
     resolve,
@@ -168,6 +306,8 @@ export const make = Effect.gen(function* () {
     rename,
     remove,
     move,
+    moveMany,
+    reorder,
   };
 });
 

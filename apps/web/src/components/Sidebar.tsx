@@ -130,7 +130,7 @@ import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useOrderWhileOpen } from "../hooks/useOrderWhileOpen";
 import { useProjectPin } from "../hooks/useProjectGroupUpdate";
 import { useSidebarProjectGroups } from "../hooks/useSidebarProjectGroups";
-import { resolveThreadFolderId, useThreadFolders } from "../hooks/useThreadFolders";
+import { readThreadFolderMenuSnapshot, useThreadFolders } from "../hooks/useThreadFolders";
 import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
 import { registerSettleAndAdvance } from "../settleAndAdvance";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
@@ -1017,7 +1017,6 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   // Row callbacks capture only the handler; the rest of the context changes with the route.
   const { handleNewThread } = newThreadContext;
   const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const threadFolders = useThreadFolders();
   const clearSelection = useThreadSelectionStore((s) => s.clearSelection);
   const setSelectionAnchor = useThreadSelectionStore((s) => s.setAnchor);
   const toggleThreadSelection = useThreadSelectionStore((s) => s.toggleThread);
@@ -1071,6 +1070,15 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const threadListRef = useRef<HTMLUListElement | null>(null);
   const searchResultsListRef = useRef<HTMLUListElement | null>(null);
   const sidebarContentRef = useRef<HTMLDivElement | null>(null);
+  const threadMenuRequestRef = useRef<AbortController | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- releases the pending folder snapshot subscription when the sidebar unmounts
+  useEffect(() => () => threadMenuRequestRef.current?.abort(), []);
+  const beginThreadMenuRequest = () => {
+    threadMenuRequestRef.current?.abort();
+    const request = new AbortController();
+    threadMenuRequestRef.current = request;
+    return request.signal;
+  };
   const dragLabelOffsetRef = useRef(0);
   const listMotionRef = useRef<ReturnType<typeof createSidebarListMotion> | null>(null);
   const shiftGuardRef = useRef<ReturnType<typeof createSidebarShiftGuard> | null>(null);
@@ -1097,6 +1105,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     routeDraftThread,
     routeDraftRedirect,
   );
+  const threadFolders = useThreadFolders(
+    routeThreadRef?.environmentId ?? routeDraftThread?.environmentId ?? null,
+  );
   const routeThreadKey = routeThreadRef ? scopedThreadKey(routeThreadRef) : null;
 
   const selectThreadFolder = (folderId: string | null) => {
@@ -1104,9 +1115,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     threadFolders.selectFolder(folderId);
     scrollSidebarToTop(sidebarContentRef.current);
   };
-  const toggleShowAllThreads = () => {
+  const selectAllThreadsMode = (showAll: boolean) => {
     clearSelection();
-    threadFolders.toggleShowAll();
+    threadFolders.selectAllMode(showAll);
     scrollSidebarToTop(sidebarContentRef.current);
   };
 
@@ -2614,31 +2625,32 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         const workspacePath =
           session.worktreePath ??
           projectByKey.get(`${session.environmentId}:${session.projectId}`)?.workspaceRoot;
-        const canMove =
-          threadFolders.ready &&
-          threadFolders.folders.length > 0 &&
-          session.environmentId === threadFolders.environmentId;
+        const signal = beginThreadMenuRequest();
+        const snapshot = await readThreadFolderMenuSnapshot(session.environmentId, "draft", signal);
+        if (signal.aborted) return;
         const clicked = await settlePromise(() =>
           api.contextMenu.show(
             buildDraftActionMenuItems({
               hasPath: Boolean(workspacePath),
               hasBranch: Boolean(session.branch),
               hasProject: projectGroup != null,
-              folderMoves: canMove
-                ? threadFolderDestinations(
-                    threadFolders.folders,
-                    resolveThreadFolderId(session.environmentId, session.folderId),
-                  )
-                : undefined,
+              folderMoves:
+                snapshot && snapshot.folders.length > 0
+                  ? threadFolderDestinations(snapshot.folders, session.folderId)
+                  : undefined,
             }),
             position,
             source,
           ),
         );
-        if (clicked._tag === "Failure") return;
-        const destination = readThreadFolderDestination(clicked.value, threadFolders.folders);
-        if (canMove && destination !== undefined) {
-          useComposerDraftStore.getState().setDraftThreadFolder(draftId, destination);
+        if (signal.aborted || clicked._tag === "Failure") return;
+        const destination = snapshot
+          ? readThreadFolderDestination(clicked.value, snapshot.folders)
+          : undefined;
+        if (destination !== undefined) {
+          const store = useComposerDraftStore.getState();
+          if (store.getDraftSession(draftId)?.environmentId === session.environmentId)
+            store.setDraftThreadFolder(draftId, destination);
           return;
         }
         switch (clicked.value) {
@@ -2669,28 +2681,28 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const handleThreadFolderMenu = useStableCallback(
     (threadRef: ScopedThreadRef, position: { x: number; y: number }, source: ContextMenuSource) => {
       const api = readLocalApi();
-      const assignments = threadFolders.assignments;
-      if (
-        !api ||
-        !threadFolders.canManage ||
-        !assignments ||
-        threadRef.environmentId !== threadFolders.environmentId
-      )
-        return;
+      if (!api) return;
       void (async () => {
+        const signal = beginThreadMenuRequest();
+        const snapshot = await readThreadFolderMenuSnapshot(
+          threadRef.environmentId,
+          "thread",
+          signal,
+        );
+        if (signal.aborted || !snapshot || snapshot.folders.length === 0) return;
         const clicked = await settlePromise(() =>
           api.contextMenu.show(
             threadFolderDestinations(
-              threadFolders.folders,
-              threadFolderAssignment(assignments, threadRef.threadId),
+              snapshot.folders,
+              threadFolderAssignment(snapshot.assignments, threadRef.threadId),
             ),
             position,
             source,
           ),
         );
-        if (clicked._tag === "Failure") return;
-        const destination = readThreadFolderDestination(clicked.value, threadFolders.folders);
-        if (destination !== undefined) await threadFolders.move(threadRef.threadId, destination);
+        if (signal.aborted || clicked._tag === "Failure") return;
+        const destination = readThreadFolderDestination(clicked.value, snapshot.folders);
+        if (destination !== undefined) await threadFolders.move(threadRef, destination);
       })();
     },
   );
@@ -2702,18 +2714,19 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         if (!api) return;
         const threadKey = scopedThreadKey(threadRef);
         const selectionState = useThreadSelectionStore.getState();
+        const signal = beginThreadMenuRequest();
         if (selectionState.hasSelection() && selectionState.selectedThreadKeys.has(threadKey)) {
           await handleMultiSelectContextMenu(position, source);
           return;
         }
         const thread = threadByKeyRef.current.get(threadKey);
         if (!thread) return;
-        const assignments = threadFolders.assignments;
-        const canMove =
-          threadFolders.canManage &&
-          assignments !== undefined &&
-          threadFolders.folders.length > 0 &&
-          thread.environmentId === threadFolders.environmentId;
+        const snapshot = await readThreadFolderMenuSnapshot(
+          threadRef.environmentId,
+          "thread",
+          signal,
+        );
+        if (signal.aborted) return;
         const threadWorkspacePath =
           thread.worktreePath ??
           projectByKey.get(`${thread.environmentId}:${thread.projectId}`)?.workspaceRoot ??
@@ -2742,12 +2755,13 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         const clicked = await settlePromise(() =>
           api.contextMenu.show(
             buildThreadActionMenuItems({
-              folderMoves: canMove
-                ? threadFolderDestinations(
-                    threadFolders.folders,
-                    threadFolderAssignment(assignments, thread.id),
-                  )
-                : undefined,
+              folderMoves:
+                snapshot && snapshot.folders.length > 0
+                  ? threadFolderDestinations(
+                      snapshot.folders,
+                      threadFolderAssignment(snapshot.assignments, thread.id),
+                    )
+                  : undefined,
               canOperate: readEnvironmentScope(
                 threadRef.environmentId,
                 AuthOrchestrationOperateScope,
@@ -2785,10 +2799,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             source,
           ),
         );
-        if (clicked._tag === "Failure" || clicked.value === null) return;
-        const destination = readThreadFolderDestination(clicked.value, threadFolders.folders);
-        if (canMove && destination !== undefined) {
-          await threadFolders.move(thread.id, destination);
+        if (signal.aborted || clicked._tag === "Failure" || clicked.value === null) return;
+        const destination = snapshot
+          ? readThreadFolderDestination(clicked.value, snapshot.folders)
+          : undefined;
+        if (destination !== undefined) {
+          await threadFolders.move(threadRef, destination);
           return;
         }
         if (threadActionRequiresOperate(clicked.value) && !checkThreadOperations([thread])) return;
@@ -3116,7 +3132,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                     }
                     if (!item) return;
                     if (item.value === SHOW_ALL_THREADS_ITEM.value) {
-                      toggleShowAllThreads();
+                      selectAllThreadsMode(!threadFolders.isAllThreadsView);
                     } else if (item.value === "all") {
                       setProjectScopeKeys([]);
                     } else if (
@@ -3225,7 +3241,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                         const project = projectGroupByScopeKey.get(item.value) ?? null;
                         const isSelected =
                           item.value === SHOW_ALL_THREADS_ITEM.value
-                            ? threadFolders.showAll
+                            ? threadFolders.isAllThreadsView
                             : project
                               ? projectScopeKeys.includes(item.value)
                               : projectScopeKeys.length === 0;
@@ -3331,6 +3347,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 selectedFolderId={threadFolders.folderId}
                 showAll={threadFolders.showAll}
                 canManage={threadFolders.canManage}
+                canReorder={threadFolders.canReorder}
+                onReorder={threadFolders.reorder}
+                onSelectAllMode={selectAllThreadsMode}
                 onSelect={selectThreadFolder}
                 onCreate={async (name) => {
                   const created = await threadFolders.create(name);
@@ -3610,7 +3629,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             renamingTitle={renamingThreadKey === threadKey ? renamingTitle : ""}
                             onContextMenu={handleThreadContextMenu}
                             onFolderMenu={
-                              threadFolders.canManage &&
+                              threadFolders.canMove &&
                               threadFolders.folders.length > 0 &&
                               thread.environmentId === threadFolders.environmentId
                                 ? handleThreadFolderMenu
